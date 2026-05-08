@@ -267,6 +267,35 @@ async def test_auto_registers_plugin_commands_for_discord(adapter):
 
 
 @pytest.mark.asyncio
+async def test_auto_registered_plugin_prompt_hint_uses_prompt_option(adapter):
+    """Plugin commands with args_hint='prompt' should mirror /steer's prompt option."""
+    adapter._run_simple_slash = AsyncMock()
+
+    with patch(
+        "hermes_cli.plugins.get_plugin_commands",
+        return_value={
+            "obsidian": {
+                "handler": lambda _a: "ok",
+                "description": "Search Obsidian vault",
+                "args_hint": "prompt",
+                "plugin": "hermes-obsidian-plugin",
+            }
+        },
+    ):
+        adapter._register_slash_commands()
+
+    obsidian_cmd = adapter._client.tree.commands["obsidian"]
+    assert "prompt" in obsidian_cmd.callback.__annotations__
+    assert "args" not in obsidian_cmd.callback.__annotations__
+
+    interaction = SimpleNamespace()
+    await obsidian_cmd.callback(interaction, prompt="project decision")
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction, "/obsidian project decision"
+    )
+
+
+@pytest.mark.asyncio
 async def test_auto_registered_plugin_command_without_args_hint(adapter):
     """Plugin commands without args_hint should register as parameterless."""
     adapter._run_simple_slash = AsyncMock()
