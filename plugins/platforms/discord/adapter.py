@@ -4056,16 +4056,29 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 handler = _make_read_handler(_name)
             elif has_args:
-                def _make_args_handler(__name: str, __hint: str):
-                    @discord.app_commands.describe(args=f"Arguments: {__hint}"[:100])
-                    async def _handler(interaction: discord.Interaction, args: str = ""):
-                        await self._run_simple_slash(
-                            interaction, f"/{__name} {args}".strip()
-                        )
-                    _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
-                    return _handler
+                hint_key = _args_hint.strip().lower().strip("<>[]: ")
+                if hint_key == "prompt":
+                    def _make_prompt_handler(__name: str):
+                        @discord.app_commands.describe(prompt="Prompt text")
+                        async def _handler(interaction: discord.Interaction, prompt: str = ""):
+                            await self._run_simple_slash(
+                                interaction, f"/{__name} {prompt}".strip()
+                            )
+                        _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
+                        return _handler
 
-                handler = _make_args_handler(_name, _args_hint)
+                    handler = _make_prompt_handler(_name)
+                else:
+                    def _make_args_handler(__name: str, __hint: str):
+                        @discord.app_commands.describe(args=f"Arguments: {__hint}"[:100])
+                        async def _handler(interaction: discord.Interaction, args: str = ""):
+                            await self._run_simple_slash(
+                                interaction, f"/{__name} {args}".strip()
+                            )
+                        _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
+                        return _handler
+
+                    handler = _make_args_handler(_name, _args_hint)
             else:
                 def _make_simple_handler(__name: str):
                     async def _handler(interaction: discord.Interaction):
