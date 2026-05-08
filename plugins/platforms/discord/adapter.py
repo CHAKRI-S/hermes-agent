@@ -4048,9 +4048,9 @@ class DiscordAdapter(BasePlatformAdapter):
 
             if _name.lower() in {"read20", "read50", "read100", "read200"}:
                 def _make_read_handler(__name: str):
-                    @discord.app_commands.describe(args="Question to answer after reading this channel/thread history")
-                    async def _handler(interaction: discord.Interaction, args: str = ""):
-                        await self._run_read_history_slash(interaction, __name, args)
+                    @discord.app_commands.describe(prompt="Question to answer after reading this channel/thread history")
+                    async def _handler(interaction: discord.Interaction, prompt: str):
+                        await self._run_read_history_slash(interaction, __name, prompt)
                     _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
                     return _handler
 
