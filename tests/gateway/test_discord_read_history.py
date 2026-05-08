@@ -1,0 +1,159 @@
+"""Tests for Discord /readXX history injection commands."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+import sys
+
+import pytest
+
+from gateway.config import PlatformConfig
+
+
+def _ensure_discord_mock():
+    if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
+        return
+
+    discord_mod = sys.modules.get("discord") or MagicMock()
+    discord_mod.Intents.default.return_value = MagicMock()
+    discord_mod.DMChannel = type("DMChannel", (), {})
+    discord_mod.Thread = type("Thread", (), {})
+    discord_mod.ForumChannel = type("ForumChannel", (), {})
+    discord_mod.Interaction = object
+
+    class _FakeCommand:
+        def __init__(self, *, name, description, callback, parent=None):
+            self.name = name
+            self.description = description
+            self.callback = callback
+            self.parent = parent
+
+    discord_mod.app_commands = SimpleNamespace(
+        describe=lambda **kwargs: (lambda fn: fn),
+        choices=lambda **kwargs: (lambda fn: fn),
+        autocomplete=lambda **kwargs: (lambda fn: fn),
+        Choice=lambda **kwargs: SimpleNamespace(**kwargs),
+        Command=_FakeCommand,
+        Group=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    ext_mod = MagicMock()
+    commands_mod = MagicMock()
+    commands_mod.Bot = MagicMock
+    ext_mod.commands = commands_mod
+
+    sys.modules["discord"] = discord_mod
+    sys.modules.setdefault("discord.ext", ext_mod)
+    sys.modules.setdefault("discord.ext.commands", commands_mod)
+
+
+_ensure_discord_mock()
+
+from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+
+
+class FakeHistoryChannel:
+    id = 123
+    name = "control"
+
+    def __init__(self, messages):
+        self.messages = messages
+        self.calls = []
+
+    def history(self, **kwargs):
+        self.calls.append(kwargs)
+
+        async def _aiter():
+            for msg in self.messages:
+                yield msg
+
+        return _aiter()
+
+
+def _msg(content, name="Tik", *, bot=False, kind="default", mid=1):
+    return SimpleNamespace(
+        id=mid,
+        content=content,
+        clean_content=content,
+        author=SimpleNamespace(display_name=name, name=name, bot=bot),
+        created_at=datetime(2026, 5, 8, 12, 0, mid, tzinfo=timezone.utc),
+        type=SimpleNamespace(name=kind),
+        attachments=[],
+    )
+
+
+@pytest.fixture
+def adapter():
+    config = PlatformConfig(enabled=True, token="***")
+    return DiscordAdapter(config)
+
+
+def test_parse_fixed_read_history_commands(adapter):
+    assert adapter._parse_read_history_command("/read20 สรุปให้หน่อย") == (20, "สรุปให้หน่อย")
+    assert adapter._parse_read_history_command("/read50") == (50, "")
+    assert adapter._parse_read_history_command("/read100 มี task ค้างไหม") == (100, "มี task ค้างไหม")
+    assert adapter._parse_read_history_command("/read200") == (200, "")
+    assert adapter._parse_read_history_command("/read 50") is None
+    assert adapter._parse_read_history_command("/read500") is None
+
+
+@pytest.mark.asyncio
+async def test_read_history_injection_fetches_current_channel_and_skips_bots(adapter):
+    channel = FakeHistoryChannel([
+        _msg("ข้อความล่าสุด", "Tik", mid=3),
+        _msg("bot noise", "Hermes", bot=True, mid=2),
+        _msg("รายละเอียดงาน", "Somchai", mid=1),
+    ])
+    current = SimpleNamespace(created_at=datetime(2026, 5, 8, 12, 1, 0, tzinfo=timezone.utc))
+
+    text = await adapter._inject_read_history_context(
+        "/read50 จากที่คุยกันควรตอบว่าไง",
+        channel=channel,
+        before=current,
+    )
+
+    assert channel.calls == [{"limit": 51, "before": current}]
+    assert "[Discord history: last 50 messages from #control]" in text
+    assert "Tik: ข้อความล่าสุด" in text
+    assert "Somchai: รายละเอียดงาน" in text
+    assert "bot noise" not in text
+    assert "Skipped 1 bot/system message" in text
+    assert "User question:\nจากที่คุยกันควรตอบว่าไง" in text
+    assert not text.startswith("/read50")
+
+
+@pytest.mark.asyncio
+async def test_read_history_without_question_asks_for_summary(adapter):
+    channel = FakeHistoryChannel([_msg("คุยเรื่อง read50", "Tik", mid=1)])
+
+    text = await adapter._inject_read_history_context("/read20", channel=channel)
+
+    assert "last 20 messages" in text
+    assert "User question:\nสรุป context ล่าสุดจากข้อความย้อนหลังด้านบนให้หน่อย" in text
+
+
+@pytest.mark.asyncio
+async def test_native_read50_slash_uses_history_instead_of_simple_command(adapter):
+    adapter._check_slash_authorization = AsyncMock(return_value=True)
+    adapter.handle_message = AsyncMock()
+
+    channel = FakeHistoryChannel([_msg("คุยเรื่อง deploy", "Tik", mid=1)])
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42, name="Tik", display_name="Tik"),
+        channel=channel,
+        channel_id=123,
+        guild_id=999,
+        response=SimpleNamespace(defer=AsyncMock()),
+        delete_original_response=AsyncMock(),
+    )
+
+    await adapter._run_read_history_slash(interaction, "read50", "สรุปให้หน่อย")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.message_type.name == "TEXT"
+    assert "[Discord history: last 50 messages from #control]" in event.text
+    assert "User question:\nสรุปให้หน่อย" in event.text
