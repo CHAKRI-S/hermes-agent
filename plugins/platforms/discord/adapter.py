@@ -22,6 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -3609,6 +3610,61 @@ class DiscordAdapter(BasePlatformAdapter):
             # so a rejected invoker can receive an ephemeral rejection.
             await self._handle_thread_create_slash(interaction, name, message, auto_archive_duration)
 
+        @tree.command(name="read", description="Read Discord history, optionally with a custom limit, then answer")
+        @discord.app_commands.describe(
+            prompt="Question to answer after reading this channel/thread history",
+            limit="Number of messages to read (20, 50, 100, 200, 300, 500, or 1000)",
+        )
+        @discord.app_commands.choices(limit=[
+            discord.app_commands.Choice(name="20 messages", value=20),
+            discord.app_commands.Choice(name="50 messages", value=50),
+            discord.app_commands.Choice(name="100 messages", value=100),
+            discord.app_commands.Choice(name="200 messages", value=200),
+            discord.app_commands.Choice(name="300 messages", value=300),
+            discord.app_commands.Choice(name="500 messages", value=500),
+            discord.app_commands.Choice(name="1000 messages", value=1000),
+        ])
+        async def slash_read(
+            interaction: discord.Interaction,
+            prompt: str = "",
+            limit: int = 200,
+        ):
+            await self._run_read_history_slash(interaction, "read", prompt, limit=limit)
+
+        @tree.command(name="threadread", description="Create a thread, read parent-channel history, then summarize there")
+        @discord.app_commands.describe(
+            name="Thread name",
+            prompt="Question/instruction after reading the parent channel history",
+            limit="Number of parent-channel messages to read (20, 50, 100, 200, 300, 500, or 1000)",
+            auto_archive_duration="Auto-archive in minutes (60, 1440, 4320, 10080)",
+        )
+        @discord.app_commands.choices(limit=[
+            discord.app_commands.Choice(name="20 messages", value=20),
+            discord.app_commands.Choice(name="50 messages", value=50),
+            discord.app_commands.Choice(name="100 messages", value=100),
+            discord.app_commands.Choice(name="200 messages", value=200),
+            discord.app_commands.Choice(name="300 messages", value=300),
+            discord.app_commands.Choice(name="500 messages", value=500),
+            discord.app_commands.Choice(name="1000 messages", value=1000),
+        ])
+        async def slash_threadread(
+            interaction: discord.Interaction,
+            name: str,
+            prompt: str = "",
+            limit: int = 200,
+            auto_archive_duration: int = 1440,
+        ):
+            # defer() is performed inside the handler *after* the auth gate
+            # so a rejected invoker can receive an ephemeral rejection.
+            await self._handle_thread_read_slash(
+                interaction,
+                limit=limit,
+                name=name,
+                prompt=prompt,
+                auto_archive_duration=auto_archive_duration,
+            )
+
+
         @tree.command(name="queue", description="Queue a prompt for the next turn (doesn't interrupt)")
         @discord.app_commands.describe(prompt="The prompt to queue")
         async def slash_queue(interaction: discord.Interaction, prompt: str):
@@ -3629,16 +3685,7 @@ class DiscordAdapter(BasePlatformAdapter):
             desc = (_description or f"Run /{_name}")[:100]
             has_args = bool(_args_hint)
 
-            if _name.lower() in {"read20", "read50", "read100", "read200"}:
-                def _make_read_handler(__name: str):
-                    @discord.app_commands.describe(prompt="Question to answer after reading this channel/thread history")
-                    async def _handler(interaction: discord.Interaction, prompt: str):
-                        await self._run_read_history_slash(interaction, __name, prompt)
-                    _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
-                    return _handler
-
-                handler = _make_read_handler(_name)
-            elif has_args:
+            if has_args:
                 hint_key = _args_hint.strip().lower().strip("<>[]: ")
                 if hint_key == "prompt":
                     def _make_prompt_handler(__name: str):
@@ -4017,6 +4064,267 @@ class DiscordAdapter(BasePlatformAdapter):
         )
         return (len(self._skill_entries), self._skill_group_hidden_count)
 
+    _READ_HISTORY_LIMITS = {20, 50, 100, 200, 300, 500, 1000}
+    _READ_HISTORY_DEFAULT_LIMIT = 200
+    _READ_HISTORY_DEFAULT_QUESTION = "สรุป context ล่าสุดจากข้อความย้อนหลังด้านบนให้หน่อย"
+    _THREAD_READ_DEFAULT_PROMPT = "สรุป context ล่าสุดจากข้อความย้อนหลังด้านบนเพื่อเริ่ม thread ใหม่นี้ให้หน่อย"
+
+    def _coerce_read_history_limit(self, value: Any) -> Optional[int]:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return None
+        if limit not in self._READ_HISTORY_LIMITS:
+            return None
+        return limit
+
+    def _parse_read_history_command(self, text: str) -> Optional[Tuple[int, str]]:
+        """Parse Discord history commands.
+
+        Supported forms:
+        - ``/read20 question`` / ``/read50`` / ``/read100`` / ``/read200``
+        - ``/read prompt: question`` (defaults to 200)
+        - ``/read limit: 500 prompt: question``
+        - ``/read 500 question``
+        """
+        raw = (text or "").strip()
+        fixed = re.match(r"^/read(20|50|100|200|300|500|1000)(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
+        if fixed:
+            prompt = (fixed.group(2) or "").strip()
+            prompt_match = re.search(r"(?:^|\s)prompt\s*[:=]\s*(.*)$", prompt, re.IGNORECASE | re.DOTALL)
+            if prompt_match:
+                prompt = prompt_match.group(1).strip()
+            return int(fixed.group(1)), prompt
+
+        generic = re.match(r"^/read(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
+        if not generic:
+            return None
+
+        body = (generic.group(1) or "").strip()
+        limit = self._READ_HISTORY_DEFAULT_LIMIT
+        prompt = body
+
+        # Prefer explicit labels so Thai/free-form prompts can contain numbers safely.
+        limit_match = re.search(r"(?:^|\s)(?:limit|count|messages)\s*[:=]\s*(\d+)(?=\s|$)", body, re.IGNORECASE)
+        if limit_match:
+            parsed_limit = self._coerce_read_history_limit(limit_match.group(1))
+            if parsed_limit is None:
+                return None
+            limit = parsed_limit
+            prompt = (body[:limit_match.start()] + " " + body[limit_match.end():]).strip()
+        else:
+            leading_limit = re.match(r"^(20|50|100|200|300|500|1000)(?:\s+(.*))?$", body, re.IGNORECASE | re.DOTALL)
+            if leading_limit:
+                limit = int(leading_limit.group(1))
+                prompt = (leading_limit.group(2) or "").strip()
+
+        prompt_match = re.search(r"(?:^|\s)prompt\s*[:=]\s*(.*)$", prompt, re.IGNORECASE | re.DOTALL)
+        if prompt_match:
+            prompt = prompt_match.group(1).strip()
+        return limit, prompt
+
+    def _parse_thread_read_command(self, text: str) -> Optional[Tuple[int, str, str]]:
+        """Parse text commands like ``/threadread name: \"Plan\" prompt: ...``.
+
+        ``/threadread200`` remains supported as a backwards-compatible alias;
+        ``limit:`` can be used on the unsuffixed command for deeper reads.
+        """
+        raw = (text or "").strip()
+        match = re.match(r"^/threadread(20|50|100|200|300|500|1000)?(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        suffix_limit = match.group(1)
+        body = (match.group(2) or "").strip()
+        limit = int(suffix_limit) if suffix_limit else self._READ_HISTORY_DEFAULT_LIMIT
+
+        limit_match = re.search(r"(?:^|\s)(?:limit|count|messages)\s*[:=]\s*(\d+)(?=\s|$)", body, re.IGNORECASE)
+        if limit_match:
+            parsed_limit = self._coerce_read_history_limit(limit_match.group(1))
+            if parsed_limit is None:
+                return None
+            limit = parsed_limit
+            body = (body[:limit_match.start()] + " " + body[limit_match.end():]).strip()
+
+        name_label = re.search(r"(?:^|\s)name\s*[:=]\s*", body, re.IGNORECASE)
+        if not name_label:
+            return None
+        rest = body[name_label.end():].strip()
+        quoted_name = False
+        if rest.startswith('"'):
+            end = rest.find('"', 1)
+            if end <= 0:
+                return None
+            name = rest[1:end].strip()
+            after_name = rest[end + 1:].strip()
+            quoted_name = True
+        elif rest.startswith("'"):
+            end = rest.find("'", 1)
+            if end <= 0:
+                return None
+            name = rest[1:end].strip()
+            after_name = rest[end + 1:].strip()
+            quoted_name = True
+        else:
+            prompt_label = re.search(r"(?:^|\s)prompt\s*[:=]", rest, re.IGNORECASE)
+            if prompt_label:
+                name = rest[:prompt_label.start()].strip()
+                after_name = rest[prompt_label.start():].strip()
+            else:
+                name = rest.strip()
+                after_name = ""
+        if not name:
+            return None
+
+        prompt = ""
+        prompt_match = re.search(r"(?:^|\s)prompt\s*[:=]\s*(.*)$", after_name, re.IGNORECASE | re.DOTALL)
+        if prompt_match:
+            prompt = prompt_match.group(1).strip()
+        elif suffix_limit and quoted_name:
+            # Back-compat: /threadread200 name: "Thread" summarize this.
+            prompt = after_name.strip()
+        return limit, name, prompt
+
+    def _format_history_message(self, msg: Any) -> Optional[str]:
+        """Format one Discord history message for ephemeral prompt injection."""
+        author = getattr(msg, "author", None)
+        if getattr(author, "bot", False):
+            return None
+        msg_type = getattr(msg, "type", None)
+        type_name = str(getattr(msg_type, "name", msg_type or "default")).lower()
+        if type_name not in ("default", "reply", "none"):
+            return None
+
+        content = (
+            getattr(msg, "clean_content", None)
+            or getattr(msg, "content", None)
+            or ""
+        ).strip()
+        attachments = getattr(msg, "attachments", None) or []
+        if attachments:
+            names = []
+            for att in attachments:
+                name = getattr(att, "filename", None) or getattr(att, "url", None) or "attachment"
+                names.append(str(name))
+            attachment_text = ", ".join(names[:5])
+            content = f"{content} [attachments: {attachment_text}]".strip()
+        if not content:
+            return None
+
+        display_name = (
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or "unknown"
+        )
+        created = getattr(msg, "created_at", None)
+        timestamp = ""
+        if created is not None:
+            try:
+                timestamp = created.strftime("%Y-%m-%d %H:%M") + " "
+            except Exception:
+                timestamp = ""
+        return f"- {timestamp}{display_name}: {content}"
+
+    async def _inject_read_history_context(
+        self,
+        text: str,
+        *,
+        channel: Any,
+        before: Any = None,
+        anchor: Any = None,
+    ) -> str:
+        """Replace ``/readXX``/``/read`` with recent Discord channel/thread context."""
+        parsed = self._parse_read_history_command(text)
+        if not parsed:
+            return text
+        limit, question = parsed
+        question = question or self._READ_HISTORY_DEFAULT_QUESTION
+
+        channel_name = getattr(channel, "name", None) or str(getattr(channel, "id", "current channel"))
+        header_name = f"#{channel_name}" if channel_name and not str(channel_name).startswith("#") else str(channel_name)
+
+        lines: List[str] = []
+        skipped = 0
+        anchor_line = self._format_history_message(anchor) if anchor is not None else None
+        history_limit = max(limit - 1, 0) if anchor_line else limit + 1
+        history_kwargs = {"limit": history_limit}
+        if anchor is not None:
+            history_kwargs["before"] = anchor
+        elif before is not None:
+            history_kwargs["before"] = before
+        try:
+            async for msg in channel.history(**history_kwargs):
+                formatted = self._format_history_message(msg)
+                if formatted:
+                    lines.append(formatted)
+                else:
+                    skipped += 1
+                if len(lines) >= history_limit:
+                    break
+        except Exception as exc:
+            logger.warning("[%s] Failed to read Discord history: %s", self.name, exc, exc_info=True)
+            return (
+                f"I tried to read the last {limit} Discord messages from {header_name}, "
+                f"but Discord history fetch failed: {exc}\n\n"
+                f"User question:\n{question}"
+            )
+
+        if anchor_line:
+            lines_block = list(reversed(lines))
+            lines_block.append(anchor_line)
+            history_block = "\n".join(lines_block) if lines_block else anchor_line
+            header = f"[Discord history: last {limit} messages up to replied message from {header_name}]"
+        elif not lines:
+            history_block = "(No readable non-bot text messages found in the requested Discord history window.)"
+            header = f"[Discord history: last {limit} messages from {header_name}]"
+        else:
+            # Discord returns newest-first; present oldest-first for natural reading.
+            history_block = "\n".join(reversed(lines))
+            header = f"[Discord history: last {limit} messages from {header_name}]"
+
+        skipped_note = ""
+        if skipped:
+            noun = "message" if skipped == 1 else "messages"
+            skipped_note = f"\n\n[Skipped {skipped} bot/system {noun}.]"
+
+        return (
+            f"{header}\n"
+            f"{history_block}"
+            f"{skipped_note}\n\n"
+            f"User question:\n{question}"
+        )
+
+    async def _run_read_history_slash(
+        self,
+        interaction: discord.Interaction,
+        command_name: str,
+        question: str = "",
+        *,
+        limit: Optional[int] = None,
+    ) -> None:
+        """Handle native Discord /readXX and /read commands with channel.history access."""
+        if command_name.lower() == "read":
+            effective_limit = self._coerce_read_history_limit(limit or self._READ_HISTORY_DEFAULT_LIMIT)
+            if effective_limit is None:
+                effective_limit = self._READ_HISTORY_DEFAULT_LIMIT
+            command_text = f"/read{effective_limit} {question}".strip()
+        else:
+            command_text = f"/{command_name} {question}".strip()
+        if not await self._check_slash_authorization(interaction, command_text):
+            return
+        await interaction.response.defer(ephemeral=True)
+        injected = await self._inject_read_history_context(
+            command_text,
+            channel=interaction.channel,
+            before=None,
+        )
+        event = self._build_slash_event(interaction, injected)
+        event.message_type = MessageType.TEXT
+        await self.handle_message(event)
+        try:
+            await interaction.delete_original_response()
+        except Exception as e:
+            logger.debug("Discord read-history slash cleanup failed: %s", e)
+
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
         is_dm = isinstance(interaction.channel, discord.DMChannel)
@@ -4104,6 +4412,110 @@ class DiscordAdapter(BasePlatformAdapter):
         starter = (message or "").strip()
         if starter and thread_id:
             await self._dispatch_thread_session(interaction, thread_id, thread_name, starter)
+
+    async def _handle_thread_read_slash(
+        self,
+        interaction: discord.Interaction,
+        *,
+        limit: int,
+        name: str,
+        prompt: str = "",
+        auto_archive_duration: int = 1440,
+    ) -> None:
+        """Create a thread, inject parent-channel history, and start a session there."""
+        command_text = f"/threadread{limit} name: {name}".strip()
+        if not await self._check_slash_authorization(interaction, command_text):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        if limit not in self._READ_HISTORY_LIMITS:
+            await interaction.followup.send(
+                f"Failed to create thread: unsupported history limit {limit}.",
+                ephemeral=True,
+            )
+            return
+
+        result = await self._create_thread(
+            interaction,
+            name=name,
+            message="",
+            auto_archive_duration=auto_archive_duration,
+        )
+        if not result.get("success"):
+            error = result.get("error", "unknown error")
+            await interaction.followup.send(f"Failed to create thread: {error}", ephemeral=True)
+            return
+
+        thread_id = result.get("thread_id")
+        thread_name = result.get("thread_name") or name
+        link = f"<#{thread_id}>" if thread_id else f"**{thread_name}**"
+        await interaction.followup.send(
+            f"Created thread {link} and queued a /read{limit} summary from this channel.",
+            ephemeral=True,
+        )
+
+        if not thread_id:
+            return
+        self._threads.mark(thread_id)
+
+        question = (prompt or "").strip() or self._THREAD_READ_DEFAULT_PROMPT
+        injected = await self._inject_read_history_context(
+            f"/read{limit} {question}",
+            channel=interaction.channel,
+            before=None,
+        )
+        await self._dispatch_thread_session(interaction, thread_id, thread_name, injected)
+
+    async def _handle_thread_read_message(
+        self,
+        message: DiscordMessage,
+        *,
+        limit: int,
+        name: str,
+        prompt: str = "",
+        auto_archive_duration: int = 1440,
+        anchor: Any = None,
+    ) -> bool:
+        """Text-message fallback for ``/threadread200 name: \"...\"``.
+
+        Native slash commands are preferable, but this keeps the workflow usable
+        when Discord command sync is intentionally disabled or cached.
+        """
+        interaction_like = SimpleNamespace(
+            channel=message.channel,
+            channel_id=getattr(getattr(message, "channel", None), "id", None),
+            user=getattr(message, "author", None),
+            guild=getattr(message, "guild", None),
+        )
+        result = await self._create_thread(
+            interaction_like,
+            name=name,
+            message="",
+            auto_archive_duration=auto_archive_duration,
+        )
+        if not result.get("success"):
+            error = result.get("error", "unknown error")
+            try:
+                await message.channel.send(f"Failed to create thread: {error}")
+            except Exception:
+                logger.warning("[%s] Failed to report /threadread error: %s", self.name, error)
+            return False
+
+        thread_id = result.get("thread_id")
+        thread_name = result.get("thread_name") or name
+        if not thread_id:
+            return False
+        self._threads.mark(thread_id)
+
+        question = (prompt or "").strip() or self._THREAD_READ_DEFAULT_PROMPT
+        injected = await self._inject_read_history_context(
+            f"/read{limit} {question}",
+            channel=message.channel,
+            before=message,
+            anchor=anchor,
+        )
+        await self._dispatch_thread_session(interaction_like, thread_id, thread_name, injected)
+        return True
 
     async def _dispatch_thread_session(
         self,
@@ -4495,144 +4907,6 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] Failed to fetch channel history: %s", self.name, e)
             return ""
-
-    _READ_HISTORY_LIMITS = {20, 50, 100, 200}
-    _READ_HISTORY_DEFAULT_QUESTION = "สรุป context ล่าสุดจากข้อความย้อนหลังด้านบนให้หน่อย"
-
-    def _parse_read_history_command(self, text: str) -> Optional[Tuple[int, str]]:
-        """Parse fixed Discord history commands like ``/read50 question``.
-
-        Only fixed commands are accepted on purpose: ``/read20``, ``/read50``,
-        ``/read100``, and ``/read200``. Free-form ``/read 50`` is rejected so
-        users do not have to guess whether the number is an argument or part of
-        the command name.
-        """
-        raw = (text or "").strip()
-        match = re.match(r"^/read(20|50|100|200)(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
-        if not match:
-            return None
-        return int(match.group(1)), (match.group(2) or "").strip()
-
-    def _format_history_message(self, msg: Any) -> Optional[str]:
-        """Format one Discord history message for ephemeral prompt injection."""
-        author = getattr(msg, "author", None)
-        if getattr(author, "bot", False):
-            return None
-        msg_type = getattr(msg, "type", None)
-        type_name = str(getattr(msg_type, "name", msg_type or "default")).lower()
-        if type_name not in ("default", "reply", "none"):
-            return None
-
-        content = (
-            getattr(msg, "clean_content", None)
-            or getattr(msg, "content", None)
-            or ""
-        ).strip()
-        attachments = getattr(msg, "attachments", None) or []
-        if attachments:
-            names = []
-            for att in attachments:
-                name = getattr(att, "filename", None) or getattr(att, "url", None) or "attachment"
-                names.append(str(name))
-            attachment_text = ", ".join(names[:5])
-            content = f"{content} [attachments: {attachment_text}]".strip()
-        if not content:
-            return None
-
-        display_name = (
-            getattr(author, "display_name", None)
-            or getattr(author, "name", None)
-            or "unknown"
-        )
-        created = getattr(msg, "created_at", None)
-        timestamp = ""
-        if created is not None:
-            try:
-                timestamp = created.strftime("%Y-%m-%d %H:%M") + " "
-            except Exception:
-                timestamp = ""
-        return f"- {timestamp}{display_name}: {content}"
-
-    async def _inject_read_history_context(
-        self,
-        text: str,
-        *,
-        channel: Any,
-        before: Any = None,
-    ) -> str:
-        """Replace ``/readXX`` with recent Discord channel/thread context."""
-        parsed = self._parse_read_history_command(text)
-        if not parsed:
-            return text
-        limit, question = parsed
-        question = question or self._READ_HISTORY_DEFAULT_QUESTION
-
-        channel_name = getattr(channel, "name", None) or str(getattr(channel, "id", "current channel"))
-        header_name = f"#{channel_name}" if channel_name and not str(channel_name).startswith("#") else str(channel_name)
-
-        lines: List[str] = []
-        skipped = 0
-        history_kwargs = {"limit": limit + 1}
-        if before is not None:
-            history_kwargs["before"] = before
-        try:
-            async for msg in channel.history(**history_kwargs):
-                formatted = self._format_history_message(msg)
-                if formatted:
-                    lines.append(formatted)
-                else:
-                    skipped += 1
-                if len(lines) >= limit:
-                    break
-        except Exception as exc:
-            logger.warning("[%s] Failed to read Discord history: %s", self.name, exc, exc_info=True)
-            return (
-                f"I tried to read the last {limit} Discord messages from {header_name}, "
-                f"but Discord history fetch failed: {exc}\n\n"
-                f"User question:\n{question}"
-            )
-
-        if not lines:
-            history_block = "(No readable non-bot text messages found in the requested Discord history window.)"
-        else:
-            # Discord returns newest-first; present oldest-first for natural reading.
-            history_block = "\n".join(reversed(lines))
-
-        skipped_note = ""
-        if skipped:
-            noun = "message" if skipped == 1 else "messages"
-            skipped_note = f"\n\n[Skipped {skipped} bot/system {noun}.]"
-
-        return (
-            f"[Discord history: last {limit} messages from {header_name}]\n"
-            f"{history_block}"
-            f"{skipped_note}\n\n"
-            f"User question:\n{question}"
-        )
-
-    async def _run_read_history_slash(
-        self,
-        interaction: discord.Interaction,
-        command_name: str,
-        question: str = "",
-    ) -> None:
-        """Handle native Discord /readXX commands with channel.history access."""
-        command_text = f"/{command_name} {question}".strip()
-        if not await self._check_slash_authorization(interaction, command_text):
-            return
-        await interaction.response.defer(ephemeral=True)
-        injected = await self._inject_read_history_context(
-            command_text,
-            channel=interaction.channel,
-            before=None,
-        )
-        event = self._build_slash_event(interaction, injected)
-        event.message_type = MessageType.TEXT
-        await self.handle_message(event)
-        try:
-            await interaction.delete_original_response()
-        except Exception as e:
-            logger.debug("Discord read-history slash cleanup failed: %s", e)
 
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
@@ -5333,6 +5607,25 @@ class DiscordAdapter(BasePlatformAdapter):
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
 
+    async def _resolve_replied_message(self, message: DiscordMessage) -> Optional[Any]:
+        """Return the Discord message being replied to, fetching it when needed."""
+        reference = getattr(message, "reference", None)
+        if not reference:
+            return None
+        resolved = getattr(reference, "resolved", None)
+        if resolved is not None:
+            return resolved
+        message_id = getattr(reference, "message_id", None)
+        channel = getattr(message, "channel", None)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if message_id is None or not callable(fetch_message):
+            return None
+        try:
+            return await fetch_message(message_id)
+        except Exception as exc:
+            logger.debug("[%s] Failed to fetch replied Discord message %s: %s", self.name, message_id, exc)
+            return None
+
     async def _handle_message(self, message: DiscordMessage, role_authorized: bool = False) -> None:
         """Handle incoming Discord messages."""
         # In server channels (not DMs), require the bot to be @mentioned
@@ -5427,6 +5720,20 @@ class DiscordAdapter(BasePlatformAdapter):
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions and not mention_prefix:
                     return
+
+        reply_anchor = await self._resolve_replied_message(message)
+
+        thread_read_request = self._parse_thread_read_command(normalized_content)
+        if thread_read_request and not is_thread and not isinstance(message.channel, discord.DMChannel):
+            limit, thread_name, thread_prompt = thread_read_request
+            await self._handle_thread_read_message(
+                message,
+                limit=limit,
+                name=thread_name,
+                prompt=thread_prompt,
+                anchor=reply_anchor,
+            )
+            return
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
         # Messages already inside threads or DMs are unaffected.
@@ -5742,6 +6049,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 normalized_content,
                 channel=message.channel,
                 before=message,
+                anchor=reply_anchor,
             )
             msg_type = MessageType.TEXT
             _channel_context = None
@@ -5763,8 +6071,8 @@ class DiscordAdapter(BasePlatformAdapter):
         reply_to_text = None
         if message.reference:
             reply_to_id = str(message.reference.message_id)
-            if message.reference.resolved:
-                reply_to_text = getattr(message.reference.resolved, "content", None) or None
+            if reply_anchor is not None:
+                reply_to_text = getattr(reply_anchor, "content", None) or None
 
         event = MessageEvent(
             text=event_text,
