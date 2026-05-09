@@ -4876,6 +4876,12 @@ class DiscordAdapter(BasePlatformAdapter):
         if not thread_id:
             return
         self._threads.mark(thread_id)
+        await self._send_threadread_parent_ack(
+            getattr(interaction, "channel", None),
+            thread_id=thread_id,
+            thread_name=thread_name,
+            limit=limit,
+        )
 
         question = (prompt or "").strip() or self._THREAD_READ_DEFAULT_PROMPT
         injected = await self._inject_read_history_context(
@@ -4925,6 +4931,12 @@ class DiscordAdapter(BasePlatformAdapter):
         if not thread_id:
             return False
         self._threads.mark(thread_id)
+        await self._send_threadread_parent_ack(
+            getattr(message, "channel", None),
+            thread_id=thread_id,
+            thread_name=thread_name,
+            limit=limit,
+        )
 
         question = (prompt or "").strip() or self._THREAD_READ_DEFAULT_PROMPT
         injected = await self._inject_read_history_context(
@@ -4935,6 +4947,38 @@ class DiscordAdapter(BasePlatformAdapter):
         )
         await self._dispatch_thread_session(interaction_like, thread_id, thread_name, injected)
         return True
+
+    async def _send_threadread_parent_ack(
+        self,
+        channel: Any,
+        *,
+        thread_id: str,
+        thread_name: str,
+        limit: int,
+    ) -> None:
+        """Send a persistent parent-channel breadcrumb for /threadread.
+
+        Native slash acknowledgements are ephemeral and easy to lose after the
+        user navigates away.  Public threads created via ``create_thread()`` can
+        also appear only in Discord's Threads panel, with no parent message
+        anchor.  Post a small visible breadcrumb in the parent channel so the
+        new thread is discoverable later.
+        """
+        parent_channel = self._thread_parent_channel(channel)
+        if parent_channel is None or not hasattr(parent_channel, "send"):
+            return
+        link = f"<#{thread_id}>" if thread_id else f"**{thread_name}**"
+        try:
+            await parent_channel.send(
+                f"🧵 Created thread {link} and seeded it with /read{limit} context from this channel."
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to send /threadread parent acknowledgement for thread %s: %s",
+                self.name,
+                thread_id,
+                exc,
+            )
 
     async def _dispatch_thread_session(
         self,

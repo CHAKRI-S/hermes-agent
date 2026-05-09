@@ -72,6 +72,21 @@ class FakeHistoryChannel:
         return _aiter()
 
 
+class FakeThreadReadChannel(FakeHistoryChannel):
+    def __init__(self, messages):
+        super().__init__(messages)
+        self.sent = []
+        self.created_threads = []
+
+    async def create_thread(self, **kwargs):
+        self.created_threads.append(kwargs)
+        return SimpleNamespace(id=456, name=kwargs.get("name") or "Thread")
+
+    async def send(self, content):
+        self.sent.append(content)
+        return SimpleNamespace(id=789, content=content)
+
+
 def _msg(content, name="Tik", *, bot=False, kind="default", mid=1):
     return SimpleNamespace(
         id=mid,
@@ -238,3 +253,63 @@ async def test_native_read200_slash_injects_last_200_history_messages(adapter):
     assert "[Discord history: last 200 messages from #control]" in event.text
     assert "Tik: สรุปก่อนเปิด thread" in event.text
     assert "User question:\nอ่านแล้วสรุป" in event.text
+
+
+@pytest.mark.asyncio
+async def test_native_threadread_posts_persistent_parent_ack(adapter):
+    adapter._check_slash_authorization = AsyncMock(return_value=True)
+    adapter._dispatch_thread_session = AsyncMock()
+
+    channel = FakeThreadReadChannel([_msg("บริบทก่อนเปิด thread", "Tik", mid=1)])
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42, name="Tik", display_name="Tik"),
+        channel=channel,
+        channel_id=123,
+        guild=SimpleNamespace(name="Guild"),
+        guild_id=999,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    await adapter._handle_thread_read_slash(
+        interaction,
+        limit=200,
+        name="Planning Context",
+        prompt="สรุปต่อใน thread",
+    )
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.edit_original_response.assert_awaited_once()
+    assert channel.created_threads
+    assert channel.sent == [
+        "🧵 Created thread <#456> and seeded it with /read200 context from this channel."
+    ]
+    adapter._dispatch_thread_session.assert_awaited_once()
+    dispatched_text = adapter._dispatch_thread_session.await_args.args[3]
+    assert "[Discord history: last 200 messages from #control]" in dispatched_text
+    assert "Tik: บริบทก่อนเปิด thread" in dispatched_text
+
+
+@pytest.mark.asyncio
+async def test_text_threadread_fallback_posts_persistent_parent_ack(adapter):
+    adapter._dispatch_thread_session = AsyncMock()
+
+    channel = FakeThreadReadChannel([_msg("ข้อความเก่าที่ต้องอ่าน", "Tik", mid=1)])
+    message = SimpleNamespace(
+        author=SimpleNamespace(id=42, name="Tik", display_name="Tik"),
+        channel=channel,
+        guild=SimpleNamespace(name="Guild"),
+    )
+
+    handled = await adapter._handle_thread_read_message(
+        message,
+        limit=100,
+        name="Thread from text command",
+        prompt="สรุป context",
+    )
+
+    assert handled is True
+    assert channel.sent == [
+        "🧵 Created thread <#456> and seeded it with /read100 context from this channel."
+    ]
+    adapter._dispatch_thread_session.assert_awaited_once()
