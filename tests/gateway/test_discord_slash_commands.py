@@ -238,6 +238,75 @@ async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter)
 
 
 @pytest.mark.asyncio
+async def test_auto_registers_missing_gateway_commands(adapter):
+    """Commands in COMMAND_REGISTRY that aren't explicitly registered should
+    be auto-registered by the dynamic catch-all block."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    tree_names = set(adapter._client.tree.commands.keys())
+
+    # These commands are gateway-available but were not in the original
+    # hardcoded registration list — they should be auto-registered.
+    expected_auto = {"debug", "yolo", "profile", "plan_sprint", "run_sprint", "continue_sprint", "auto_agent"}
+    for name in expected_auto:
+        assert name in tree_names, f"/{name} should be auto-registered on Discord"
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_command_dispatches_correctly(adapter):
+    """Auto-registered commands should dispatch via _run_simple_slash."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    # /debug has no args — test parameterless dispatch
+    debug_cmd = adapter._client.tree.commands["debug"]
+    interaction = SimpleNamespace()
+    adapter._run_simple_slash.reset_mock()
+    await debug_cmd.callback(interaction)
+    adapter._run_simple_slash.assert_awaited_once_with(interaction, "/debug")
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_command_with_args(adapter):
+    """Auto-registered commands with args_hint should accept an optional args param."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    # /branch has args_hint="[name]" — test dispatch with args
+    branch_cmd = adapter._client.tree.commands["branch"]
+    interaction = SimpleNamespace()
+    adapter._run_simple_slash.reset_mock()
+    await branch_cmd.callback(interaction, args="my-branch")
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction, "/branch my-branch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sprint_auto_registered_commands_keep_acknowledgement(adapter):
+    """Sprint shortcut commands should keep a visible ephemeral acknowledgement.
+
+    Without an explicit followup, _run_simple_slash deletes the deferred
+    interaction response after dispatch, making native slash invocations feel
+    like they disappeared.
+    """
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    run_cmd = adapter._client.tree.commands["run_sprint"]
+    interaction = SimpleNamespace()
+    await run_cmd.callback(interaction, args="auto")
+
+    adapter._run_simple_slash.assert_awaited_once()
+    called_interaction, command_text, followup = adapter._run_simple_slash.await_args.args
+    assert called_interaction is interaction
+    assert command_text == "/run_sprint auto"
+    assert "Accepted `/run_sprint auto`" in followup
+    assert "sent it to Hermes" in followup
+
+
+@pytest.mark.asyncio
 async def test_auto_registers_plugin_commands_for_discord(adapter):
     """Plugin slash commands should appear as native Discord app commands."""
     adapter._run_simple_slash = AsyncMock()
