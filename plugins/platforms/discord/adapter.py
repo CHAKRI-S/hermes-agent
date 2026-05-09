@@ -4102,14 +4102,32 @@ class DiscordAdapter(BasePlatformAdapter):
             desc = (_description or f"Run /{_name}")[:100]
             has_args = bool(_args_hint)
 
+            def _followup_for_auto_command(__name: str, __command_text: str) -> str | None:
+                if __name not in {"plan_sprint", "run_sprint", "continue_sprint", "auto_agent"}:
+                    return None
+                preview = __command_text.strip()
+                if len(preview) > 96:
+                    preview = preview[:93].rstrip() + "..."
+                return f"Accepted `{preview}` and sent it to Hermes~"
+
+            async def _dispatch_auto_command(__interaction: discord.Interaction, __name: str, __command_text: str) -> None:
+                followup = _followup_for_auto_command(__name, __command_text)
+                if followup is None:
+                    await self._run_simple_slash(__interaction, __command_text)
+                else:
+                    await self._run_simple_slash(__interaction, __command_text, followup)
+
             if has_args:
                 hint_key = _args_hint.strip().lower().strip("<>[]: ")
                 if hint_key == "prompt":
                     def _make_prompt_handler(__name: str):
                         @discord.app_commands.describe(prompt="Prompt text")
                         async def _handler(interaction: discord.Interaction, prompt: str = ""):
-                            await self._run_simple_slash(
-                                interaction, f"/{__name} {prompt}".strip()
+                            command_text = f"/{__name} {prompt}".strip()
+                            await _dispatch_auto_command(
+                                interaction,
+                                __name,
+                                command_text,
                             )
                         _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
                         return _handler
@@ -4119,8 +4137,11 @@ class DiscordAdapter(BasePlatformAdapter):
                     def _make_args_handler(__name: str, __hint: str):
                         @discord.app_commands.describe(args=f"Arguments: {__hint}"[:100])
                         async def _handler(interaction: discord.Interaction, args: str = ""):
-                            await self._run_simple_slash(
-                                interaction, f"/{__name} {args}".strip()
+                            command_text = f"/{__name} {args}".strip()
+                            await _dispatch_auto_command(
+                                interaction,
+                                __name,
+                                command_text,
                             )
                         _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
                         return _handler
@@ -4129,7 +4150,12 @@ class DiscordAdapter(BasePlatformAdapter):
             else:
                 def _make_simple_handler(__name: str):
                     async def _handler(interaction: discord.Interaction):
-                        await self._run_simple_slash(interaction, f"/{__name}")
+                        command_text = f"/{__name}"
+                        await _dispatch_auto_command(
+                            interaction,
+                            __name,
+                            command_text,
+                        )
                     _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
                     return _handler
 
