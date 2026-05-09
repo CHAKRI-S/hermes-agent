@@ -51,7 +51,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
 
 
 class FakeHistoryChannel:
@@ -95,8 +95,34 @@ def test_parse_fixed_read_history_commands(adapter):
     assert adapter._parse_read_history_command("/read50") == (50, "")
     assert adapter._parse_read_history_command("/read100 มี task ค้างไหม") == (100, "มี task ค้างไหม")
     assert adapter._parse_read_history_command("/read200") == (200, "")
-    assert adapter._parse_read_history_command("/read 50") is None
-    assert adapter._parse_read_history_command("/read500") is None
+    assert adapter._parse_read_history_command("/read prompt: สรุปจากจุดนี้") == (200, "สรุปจากจุดนี้")
+    assert adapter._parse_read_history_command("/read limit: 500 prompt: สรุปย้อนหลังไกลหน่อย") == (
+        500,
+        "สรุปย้อนหลังไกลหน่อย",
+    )
+    assert adapter._parse_read_history_command("/read 1000 สรุปทั้งหมด") == (1000, "สรุปทั้งหมด")
+    assert adapter._parse_read_history_command("/read 50") == (50, "")
+    assert adapter._parse_read_history_command("/read500") == (500, "")
+    assert adapter._parse_read_history_command("/read limit: 999") is None
+
+
+def test_parse_threadread200_text_command(adapter):
+    assert adapter._parse_thread_read_command('/threadread200 name: "Planning Context"') == (
+        200,
+        "Planning Context",
+        "",
+    )
+    assert adapter._parse_thread_read_command(
+        '/threadread200 name: "Planning Context" สรุป decision ด้วย'
+    ) == (200, "Planning Context", "สรุป decision ด้วย")
+    assert adapter._parse_thread_read_command(
+        '/threadread name: "Planning Context" limit: 500 prompt: สรุป decision ด้วย'
+    ) == (500, "Planning Context", "สรุป decision ด้วย")
+    assert adapter._parse_thread_read_command(
+        '/threadread name: "Planning Context" prompt: สรุป decision ด้วย'
+    ) == (200, "Planning Context", "สรุป decision ด้วย")
+    assert adapter._parse_thread_read_command('/threadread50 name: "nope"') == (50, "nope", "")
+    assert adapter._parse_thread_read_command("/threadread200 Planning Context") is None
 
 
 @pytest.mark.asyncio
@@ -122,6 +148,29 @@ async def test_read_history_injection_fetches_current_channel_and_skips_bots(ada
     assert "Skipped 1 bot/system message" in text
     assert "User question:\nจากที่คุยกันควรตอบว่าไง" in text
     assert not text.startswith("/read50")
+
+
+@pytest.mark.asyncio
+async def test_read_history_reply_anchor_reads_up_to_replied_message(adapter):
+    channel = FakeHistoryChannel([
+        _msg("ก่อน anchor หนึ่ง", "Somchai", mid=2),
+        _msg("ก่อน anchor สอง", "Tik", mid=1),
+    ])
+    anchor = _msg("ข้อความที่ reply ถึง", "Tik", mid=3)
+    current = SimpleNamespace(created_at=datetime(2026, 5, 8, 12, 1, 0, tzinfo=timezone.utc))
+
+    text = await adapter._inject_read_history_context(
+        "/read50 prompt: สรุปจากข้อความนี้ย้อนหลัง",
+        channel=channel,
+        before=current,
+        anchor=anchor,
+    )
+
+    assert channel.calls == [{"limit": 49, "before": anchor}]
+    assert "[Discord history: last 50 messages up to replied message from #control]" in text
+    assert "Somchai: ก่อน anchor หนึ่ง" in text
+    assert "Tik: ข้อความที่ reply ถึง" in text
+    assert "User question:\nสรุปจากข้อความนี้ย้อนหลัง" in text
 
 
 @pytest.mark.asyncio
@@ -157,3 +206,29 @@ async def test_native_read50_slash_uses_history_instead_of_simple_command(adapte
     assert event.message_type.name == "TEXT"
     assert "[Discord history: last 50 messages from #control]" in event.text
     assert "User question:\nสรุปให้หน่อย" in event.text
+
+
+@pytest.mark.asyncio
+async def test_native_read200_slash_injects_last_200_history_messages(adapter):
+    adapter._check_slash_authorization = AsyncMock(return_value=True)
+    adapter.handle_message = AsyncMock()
+
+    channel = FakeHistoryChannel([_msg("สรุปก่อนเปิด thread", "Tik", mid=1)])
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42, name="Tik", display_name="Tik"),
+        channel=channel,
+        channel_id=123,
+        guild_id=999,
+        response=SimpleNamespace(defer=AsyncMock()),
+        delete_original_response=AsyncMock(),
+    )
+
+    await adapter._run_read_history_slash(interaction, "read200", "อ่านแล้วสรุป")
+
+    assert channel.calls == [{"limit": 201}]
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.message_type.name == "TEXT"
+    assert "[Discord history: last 200 messages from #control]" in event.text
+    assert "Tik: สรุปก่อนเปิด thread" in event.text
+    assert "User question:\nอ่านแล้วสรุป" in event.text

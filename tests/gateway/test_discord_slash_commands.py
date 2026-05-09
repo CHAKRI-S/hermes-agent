@@ -142,6 +142,52 @@ async def test_registers_native_thread_slash_command(adapter):
 
 
 @pytest.mark.asyncio
+async def test_registers_native_read_slash_command(adapter):
+    adapter._run_read_history_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    command = adapter._client.tree.commands["read"]
+    interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()))
+
+    await command(interaction, prompt="สรุปจากตรงนี้", limit=500)
+
+    interaction.response.defer.assert_not_awaited()
+    adapter._run_read_history_slash.assert_awaited_once_with(
+        interaction,
+        "read",
+        "สรุปจากตรงนี้",
+        limit=500,
+    )
+
+
+@pytest.mark.asyncio
+async def test_registers_native_threadread_slash_command(adapter):
+    adapter._handle_thread_read_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    command = adapter._client.tree.commands["threadread"]
+    interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()))
+
+    await command(
+        interaction,
+        name="Planning Context",
+        prompt="สรุปก่อนหน้า",
+        limit=500,
+        auto_archive_duration=1440,
+    )
+
+    interaction.response.defer.assert_not_awaited()
+    adapter._handle_thread_read_slash.assert_awaited_once_with(
+        interaction,
+        limit=500,
+        name="Planning Context",
+        prompt="สรุปก่อนหน้า",
+        auto_archive_duration=1440,
+    )
+
+
+
+@pytest.mark.asyncio
 async def test_registers_native_restart_slash_command(adapter):
     adapter._run_simple_slash = AsyncMock()
     adapter._register_slash_commands()
@@ -452,6 +498,191 @@ async def test_handle_thread_create_slash_no_dispatch_without_message(adapter):
 
 
 @pytest.mark.asyncio
+async def test_handle_thread_read_slash_creates_thread_and_dispatches_read_history(adapter):
+    class HistoryChannel:
+        id = 123
+        name = "control"
+        parent = None
+        guild = SimpleNamespace(name="TestGuild")
+        topic = None
+
+        def __init__(self):
+            self.calls = []
+            self.create_thread = AsyncMock(
+                return_value=SimpleNamespace(id=555, name="Planning Context", send=AsyncMock())
+            )
+
+        def history(self, **kwargs):
+            self.calls.append(kwargs)
+
+            async def _aiter():
+                yield SimpleNamespace(
+                    id=1,
+                    content="ก่อนหน้าเราคุยเรื่อง thread context",
+                    clean_content="ก่อนหน้าเราคุยเรื่อง thread context",
+                    author=SimpleNamespace(display_name="Tik", name="Tik", bot=False),
+                    created_at=None,
+                    type=SimpleNamespace(name="default"),
+                    attachments=[],
+                )
+
+            return _aiter()
+
+    channel = HistoryChannel()
+    interaction = SimpleNamespace(
+        channel=channel,
+        channel_id=123,
+        user=SimpleNamespace(display_name="Jezza", id=42),
+        guild=SimpleNamespace(name="TestGuild"),
+        followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+    )
+    adapter._dispatch_thread_session = AsyncMock()
+
+    await adapter._handle_thread_read_slash(
+        interaction,
+        limit=200,
+        name="Planning Context",
+        prompt="สรุป context เพื่อเริ่ม thread นี้",
+        auto_archive_duration=1440,
+    )
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    channel.create_thread.assert_awaited_once_with(
+        name="Planning Context",
+        auto_archive_duration=1440,
+        reason="Requested by Jezza via /thread",
+    )
+    assert channel.calls == [{"limit": 201}]
+    adapter._dispatch_thread_session.assert_awaited_once()
+    _, thread_id, thread_name, text = adapter._dispatch_thread_session.await_args.args
+    assert thread_id == "555"
+    assert thread_name == "Planning Context"
+    assert "[Discord history: last 200 messages from #control]" in text
+    assert "Tik: ก่อนหน้าเราคุยเรื่อง thread context" in text
+    assert "User question:\nสรุป context เพื่อเริ่ม thread นี้" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_read_text_reply_anchors_history(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+
+    class HistoryChannel:
+        id = 123
+        name = "control"
+        guild = SimpleNamespace(name="TestGuild", id=99)
+        topic = None
+
+        def __init__(self):
+            self.calls = []
+
+        def history(self, **kwargs):
+            self.calls.append(kwargs)
+
+            async def _aiter():
+                yield SimpleNamespace(
+                    id=1,
+                    content="ก่อนข้อความ anchor",
+                    clean_content="ก่อนข้อความ anchor",
+                    author=SimpleNamespace(display_name="Tik", name="Tik", bot=False),
+                    created_at=None,
+                    type=SimpleNamespace(name="default"),
+                    attachments=[],
+                )
+
+            return _aiter()
+
+    channel = HistoryChannel()
+    anchor = SimpleNamespace(
+        id=777,
+        content="ข้อความที่คลิก reply",
+        clean_content="ข้อความที่คลิก reply",
+        author=SimpleNamespace(display_name="Somchai", name="Somchai", bot=False),
+        created_at=None,
+        type=SimpleNamespace(name="default"),
+        attachments=[],
+    )
+    reference = SimpleNamespace(message_id=777, resolved=anchor)
+    msg = _fake_message(
+        channel,
+        content="/read limit: 500 prompt: สรุปจากข้อความนี้ย้อนหลัง",
+        display_name="Tik",
+        reference=reference,
+    )
+    adapter._auto_create_thread = AsyncMock()
+    adapter.handle_message = AsyncMock()
+
+    await adapter._handle_message(msg)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    assert channel.calls == [{"limit": 499, "before": anchor}]
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert "[Discord history: last 500 messages up to replied message from #control]" in event.text
+    assert "Somchai: ข้อความที่คลิก reply" in event.text
+    assert "User question:\nสรุปจากข้อความนี้ย้อนหลัง" in event.text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_threadread200_text_fallback_creates_thread_and_reads_history(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+
+    class HistoryChannel:
+        id = 123
+        name = "control"
+        parent = None
+        guild = SimpleNamespace(name="TestGuild", id=99)
+        topic = None
+
+        def __init__(self):
+            self.calls = []
+            self.create_thread = AsyncMock(
+                return_value=SimpleNamespace(id=555, name="Planning Context", send=AsyncMock())
+            )
+            self.send = AsyncMock()
+
+        def history(self, **kwargs):
+            self.calls.append(kwargs)
+
+            async def _aiter():
+                yield SimpleNamespace(
+                    id=1,
+                    content="ก่อนหน้ามี context สำคัญ",
+                    clean_content="ก่อนหน้ามี context สำคัญ",
+                    author=SimpleNamespace(display_name="Tik", name="Tik", bot=False),
+                    created_at=None,
+                    type=SimpleNamespace(name="default"),
+                    attachments=[],
+                )
+
+            return _aiter()
+
+    channel = HistoryChannel()
+    msg = _fake_message(
+        channel,
+        content='/threadread name: "Planning Context" limit: 500 prompt: สรุปก่อนเริ่มงาน',
+        display_name="Tik",
+    )
+    adapter._dispatch_thread_session = AsyncMock()
+    adapter._auto_create_thread = AsyncMock()
+
+    await adapter._handle_message(msg)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    channel.create_thread.assert_awaited_once()
+    assert channel.calls == [{"limit": 501, "before": msg}]
+    adapter._dispatch_thread_session.assert_awaited_once()
+    _, thread_id, thread_name, text = adapter._dispatch_thread_session.await_args.args
+    assert thread_id == "555"
+    assert thread_name == "Planning Context"
+    assert "[Discord history: last 500 messages from #control]" in text
+    assert "Tik: ก่อนหน้ามี context สำคัญ" in text
+    assert "User question:\nสรุปก่อนเริ่มงาน" in text
+
+
+@pytest.mark.asyncio
 async def test_handle_thread_create_slash_falls_back_to_seed_message(adapter):
     created_thread = SimpleNamespace(id=555, name="Planning")
     seed_message = SimpleNamespace(id=777, create_thread=AsyncMock(return_value=created_thread))
@@ -732,14 +963,14 @@ class _FakeThreadChannel(_discord_mod.Thread):
         return _empty()
 
 
-def _fake_message(channel, *, content="Hello", author_id=42, display_name="Jezza"):
+def _fake_message(channel, *, content="Hello", author_id=42, display_name="Jezza", reference=None):
     return SimpleNamespace(
         author=SimpleNamespace(id=author_id, display_name=display_name, bot=False),
         content=content,
         channel=channel,
         attachments=[],
         mentions=[],
-        reference=None,
+        reference=reference,
         created_at=None,
         id=12345,
     )
