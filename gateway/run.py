@@ -11486,6 +11486,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
+        if canonical in ("plan_sprint", "run_sprint", "continue_sprint", "auto_agent"):
+            from hermes_cli.sprint_commands import build_sprint_shortcut_prompt
+            shortcut = build_sprint_shortcut_prompt(canonical, event.get_command_args())
+            if shortcut.usage:
+                return shortcut.usage
+            event.text = shortcut.prompt
+            command = None
+            canonical = None
+
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
 

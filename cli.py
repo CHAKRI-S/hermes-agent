@@ -9126,6 +9126,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self._handle_curator_command(cmd_original)
         elif canonical == "kanban":
             self._handle_kanban_command(cmd_original)
+        elif canonical in ("plan_sprint", "run_sprint", "continue_sprint", "auto_agent"):
+            from hermes_cli.sprint_commands import build_sprint_shortcut_prompt
+            parts = cmd_original.split(None, 1)
+            payload = parts[1].strip() if len(parts) > 1 else ""
+            shortcut = build_sprint_shortcut_prompt(canonical, payload)
+            if shortcut.usage:
+                _cprint(f"  {shortcut.usage}")
+            elif hasattr(self, '_pending_input'):
+                self._pending_input.put(shortcut.prompt)
+                _cprint(f"  Queued sprint shortcut /{canonical} as an agent turn.")
         elif canonical == "skills":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._handle_skills_command(cmd_original)
