@@ -4308,6 +4308,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 effective_limit = self._READ_HISTORY_DEFAULT_LIMIT
             command_text = f"/read{effective_limit} {question}".strip()
         else:
+            effective_limit = self._coerce_read_history_limit(command_name[4:]) or self._READ_HISTORY_DEFAULT_LIMIT
             command_text = f"/{command_name} {question}".strip()
         if not await self._check_slash_authorization(interaction, command_text):
             return
@@ -4321,9 +4322,11 @@ class DiscordAdapter(BasePlatformAdapter):
         event.message_type = MessageType.TEXT
         await self.handle_message(event)
         try:
-            await interaction.delete_original_response()
+            await interaction.edit_original_response(
+                content=f"Read {effective_limit} Discord message(s) and sent to Hermes~"
+            )
         except Exception as e:
-            logger.debug("Discord read-history slash cleanup failed: %s", e)
+            logger.debug("Discord read-history slash acknowledgement failed: %s", e)
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
@@ -4449,9 +4452,8 @@ class DiscordAdapter(BasePlatformAdapter):
         thread_id = result.get("thread_id")
         thread_name = result.get("thread_name") or name
         link = f"<#{thread_id}>" if thread_id else f"**{thread_name}**"
-        await interaction.followup.send(
-            f"Created thread {link} and queued a /read{limit} summary from this channel.",
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content=f"Created thread {link} and queued a /read{limit} summary from this channel."
         )
 
         if not thread_id:

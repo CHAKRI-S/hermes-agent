@@ -536,6 +536,7 @@ async def test_handle_thread_read_slash_creates_thread_and_dispatches_read_histo
         guild=SimpleNamespace(name="TestGuild"),
         followup=SimpleNamespace(send=AsyncMock()),
         response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
     )
     adapter._dispatch_thread_session = AsyncMock()
 
@@ -555,6 +556,9 @@ async def test_handle_thread_read_slash_creates_thread_and_dispatches_read_histo
     )
     assert channel.calls == [{"limit": 201}]
     adapter._dispatch_thread_session.assert_awaited_once()
+    interaction.edit_original_response.assert_awaited_once()
+    args, kwargs = interaction.edit_original_response.await_args
+    assert "Created thread <#555>" in kwargs["content"]
     _, thread_id, thread_name, text = adapter._dispatch_thread_session.await_args.args
     assert thread_id == "555"
     assert thread_name == "Planning Context"

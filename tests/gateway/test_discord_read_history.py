@@ -195,12 +195,15 @@ async def test_native_read50_slash_uses_history_instead_of_simple_command(adapte
         channel_id=123,
         guild_id=999,
         response=SimpleNamespace(defer=AsyncMock()),
-        delete_original_response=AsyncMock(),
+        edit_original_response=AsyncMock(),
     )
 
     await adapter._run_read_history_slash(interaction, "read50", "สรุปให้หน่อย")
 
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.edit_original_response.assert_awaited_once()
+    args, kwargs = interaction.edit_original_response.await_args
+    assert "Read 50 Discord message(s)" in kwargs["content"]
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.message_type.name == "TEXT"
@@ -220,11 +223,14 @@ async def test_native_read200_slash_injects_last_200_history_messages(adapter):
         channel_id=123,
         guild_id=999,
         response=SimpleNamespace(defer=AsyncMock()),
-        delete_original_response=AsyncMock(),
+        edit_original_response=AsyncMock(),
     )
 
     await adapter._run_read_history_slash(interaction, "read200", "อ่านแล้วสรุป")
 
+    interaction.edit_original_response.assert_awaited_once()
+    args, kwargs = interaction.edit_original_response.await_args
+    assert "Read 200 Discord message(s)" in kwargs["content"]
     assert channel.calls == [{"limit": 201}]
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
