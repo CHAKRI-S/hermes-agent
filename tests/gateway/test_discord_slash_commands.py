@@ -306,11 +306,62 @@ async def test_sprint_auto_registered_commands_keep_acknowledgement(adapter):
     assert "sent it to Hermes" in followup
 
     adapter._run_simple_slash.reset_mock()
+    adapter._inject_sprint_shortcut_context = AsyncMock(
+        return_value="/plan_sprint [Discord history including bot answer]"
+    )
     plan_cmd = adapter._client.tree.commands["plan_sprint"]
     await plan_cmd.callback(interaction, args="")
+    adapter._inject_sprint_shortcut_context.assert_awaited_once_with(
+        "/plan_sprint",
+        interaction,
+    )
     _, command_text, followup = adapter._run_simple_slash.await_args.args
-    assert command_text == "/plan_sprint"
+    assert command_text == "/plan_sprint [Discord history including bot answer]"
     assert "infer the goal from context" in followup
+
+
+@pytest.mark.asyncio
+async def test_plan_sprint_without_args_injects_recent_history_with_bot_replies(adapter):
+    """Context-free native /plan_sprint should see the visible prior bot answer.
+
+    The normal /read history path skips bot messages to avoid feedback loops,
+    but /plan_sprint with no goal needs the immediately preceding Hermes
+    recommendation when the user turns that recommendation into a plan.
+    """
+
+    class FakeHistoryChannel:
+        name = "evara-rent"
+
+        async def history(self, **_kwargs):
+            messages = [
+                SimpleNamespace(
+                    author=SimpleNamespace(bot=True, display_name="HermesGPT", name="HermesGPT"),
+                    type=SimpleNamespace(name="default"),
+                    clean_content="ควรทำต่ออันดับ 1: Booking Flow จริงแบบครบวงจร",
+                    content="",
+                    attachments=[],
+                    created_at=None,
+                ),
+                SimpleNamespace(
+                    author=SimpleNamespace(bot=False, display_name="Tik", name="tikchakri"),
+                    type=SimpleNamespace(name="default"),
+                    clean_content="ควรพัฒนาฟีเจอร์อะไรเพิ่มเติม",
+                    content="",
+                    attachments=[],
+                    created_at=None,
+                ),
+            ]
+            for message in messages:
+                yield message
+
+    interaction = SimpleNamespace(channel=FakeHistoryChannel())
+
+    command_text = await adapter._inject_sprint_shortcut_context("/plan_sprint", interaction)
+
+    assert command_text.startswith("/plan_sprint [Discord history: last 20 messages from #evara-rent]")
+    assert "Tik: ควรพัฒนาฟีเจอร์อะไรเพิ่มเติม" in command_text
+    assert "HermesGPT: ควรทำต่ออันดับ 1: Booking Flow จริงแบบครบวงจร" in command_text
+    assert "immediately preceding recommendation" in command_text
 
 
 @pytest.mark.asyncio
