@@ -37,16 +37,16 @@ def build_sprint_shortcut_prompt(command: str, args: str | None = None) -> Sprin
     raw_args = _clean_args(args)
 
     if canonical == "plan_sprint":
-        if not raw_args:
-            return SprintShortcut(
-                command=canonical,
-                prompt="",
-                usage="Usage: /plan_sprint <goal>",
-            )
+        goal_text = raw_args or (
+            "No explicit goal was provided in the slash command. Infer the plan goal from "
+            "the current conversation/channel context and the user's most recent concrete "
+            "request. If there is no concrete request available, do not return a terse usage "
+            "error; ask one compact follow-up question with 2-3 example goal formats."
+        )
         prompt = f"""Sprint mode: create a sprint-gated plan for this request, then stop before implementation.
 
-User goal:
-{raw_args}
+User goal/context:
+{goal_text}
 
 Requirements:
 - Load and follow `sprint-plan-executor`, `plan-continuity-tracker`, and `writing-plans`.

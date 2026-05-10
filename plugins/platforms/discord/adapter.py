@@ -3691,6 +3691,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 preview = __command_text.strip()
                 if len(preview) > 96:
                     preview = preview[:93].rstrip() + "..."
+                if __name == "plan_sprint" and __command_text.strip() == "/plan_sprint":
+                    return "Accepted `/plan_sprint` — Hermes will infer the goal from context or ask one short follow-up."
                 return f"Accepted `{preview}` and sent it to Hermes~"
 
             async def _dispatch_auto_command(__interaction: discord.Interaction, __name: str, __command_text: str) -> None:
