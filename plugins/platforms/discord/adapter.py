@@ -5226,6 +5226,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
             async def _dispatch_auto_command(__interaction: discord.Interaction, __name: str, __command_text: str) -> None:
                 followup = _followup_for_auto_command(__name, __command_text)
+                if __name == "plan_sprint" and __command_text.strip() == "/plan_sprint":
+                    __command_text = await self._inject_sprint_shortcut_context(
+                        __command_text,
+                        __interaction,
+                    )
                 if followup is None:
                     await self._run_simple_slash(__interaction, __command_text)
                 else:
@@ -5741,10 +5746,10 @@ class DiscordAdapter(BasePlatformAdapter):
             prompt = after_name.strip()
         return limit, name, prompt
 
-    def _format_history_message(self, msg: Any) -> Optional[str]:
+    def _format_history_message(self, msg: Any, *, include_bots: bool = False) -> Optional[str]:
         """Format one Discord history message for ephemeral prompt injection."""
         author = getattr(msg, "author", None)
-        if getattr(author, "bot", False):
+        if getattr(author, "bot", False) and not include_bots:
             return None
         msg_type = getattr(msg, "type", None)
         type_name = str(getattr(msg_type, "name", msg_type or "default")).lower()
@@ -5788,6 +5793,7 @@ class DiscordAdapter(BasePlatformAdapter):
         channel: Any,
         before: Any = None,
         anchor: Any = None,
+        include_bots: bool = False,
     ) -> str:
         """Replace ``/readXX``/``/read`` with recent Discord channel/thread context."""
         parsed = self._parse_read_history_command(text)
@@ -5801,7 +5807,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         lines: List[str] = []
         skipped = 0
-        anchor_line = self._format_history_message(anchor) if anchor is not None else None
+        anchor_line = self._format_history_message(anchor, include_bots=include_bots) if anchor is not None else None
         history_limit = max(limit - 1, 0) if anchor_line else limit + 1
         history_kwargs = {"limit": history_limit}
         if anchor is not None:
@@ -5810,7 +5816,7 @@ class DiscordAdapter(BasePlatformAdapter):
             history_kwargs["before"] = before
         try:
             async for msg in channel.history(**history_kwargs):
-                formatted = self._format_history_message(msg)
+                formatted = self._format_history_message(msg, include_bots=include_bots)
                 if formatted:
                     lines.append(formatted)
                 else:
@@ -5849,6 +5855,31 @@ class DiscordAdapter(BasePlatformAdapter):
             f"{skipped_note}\n\n"
             f"User question:\n{question}"
         )
+
+    async def _inject_sprint_shortcut_context(self, command_text: str, interaction: discord.Interaction) -> str:
+        """Attach a small Discord backscroll to context-free sprint shortcuts.
+
+        Native Discord slash commands do not carry the visible surrounding
+        message or the replied-to message content into Hermes' normal session
+        history.  For `/plan_sprint` with no goal, include recent channel
+        context (including Hermes/bot replies) so the coordinator can turn the
+        immediately preceding recommendation into a sprint plan instead of
+        asking the user to repeat it.
+        """
+        if command_text.strip() != "/plan_sprint":
+            return command_text
+        question = (
+            "Use the recent Discord context below as the goal/context for /plan_sprint. "
+            "Prefer the user's most recent concrete request and Hermes' immediately preceding recommendation. "
+            "Create a sprint-gated plan from that context; only ask a follow-up if the backscroll is still ambiguous."
+        )
+        injected = await self._inject_read_history_context(
+            f"/read20 {question}",
+            channel=interaction.channel,
+            before=None,
+            include_bots=True,
+        )
+        return f"/plan_sprint {injected}"
 
     async def _run_read_history_slash(
         self,
