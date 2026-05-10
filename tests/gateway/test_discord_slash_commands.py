@@ -305,6 +305,13 @@ async def test_sprint_auto_registered_commands_keep_acknowledgement(adapter):
     assert "Accepted `/run_sprint auto`" in followup
     assert "sent it to Hermes" in followup
 
+    adapter._run_simple_slash.reset_mock()
+    plan_cmd = adapter._client.tree.commands["plan_sprint"]
+    await plan_cmd.callback(interaction, args="")
+    _, command_text, followup = adapter._run_simple_slash.await_args.args
+    assert command_text == "/plan_sprint"
+    assert "infer the goal from context" in followup
+
 
 @pytest.mark.asyncio
 async def test_auto_registers_plugin_commands_for_discord(adapter):
