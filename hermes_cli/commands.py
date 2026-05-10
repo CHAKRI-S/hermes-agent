@@ -215,7 +215,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                             "notify-list", "notify-unsubscribe", "log", "runs",
                             "heartbeat", "assignees", "context", "specify", "gc")),
     CommandDef("plan_sprint", "Create a sprint-gated plan, then stop before implementation",
-               "Tools & Skills", args_hint="<goal>"),
+               "Tools & Skills", args_hint="[goal]"),
     CommandDef("run_sprint", "Run one sprint from the latest active plan; use 'auto' to auto-select worker profile",
                "Tools & Skills", args_hint="[auto|plan path|notes]"),
     CommandDef("continue_sprint", "Continue the latest active unfinished sprint plan; use 'auto' for coordinator-selected worker profile",
