@@ -13,10 +13,13 @@ def test_sprint_shortcuts_are_registered_for_cli_and_gateway():
         assert name in GATEWAY_KNOWN_COMMANDS
 
 
-def test_plan_sprint_requires_goal():
+def test_plan_sprint_without_goal_falls_through_to_agent_for_context_inference():
     shortcut = build_sprint_shortcut_prompt("plan_sprint", "")
-    assert shortcut.prompt == ""
-    assert shortcut.usage == "Usage: /plan_sprint <goal>"
+    assert shortcut.usage is None
+    assert shortcut.prompt
+    assert "No explicit goal was provided" in shortcut.prompt
+    assert "Infer the plan goal from" in shortcut.prompt
+    assert "ask one compact follow-up question" in shortcut.prompt
 
 
 def test_plan_sprint_prompt_creates_plan_only():
