@@ -4,8 +4,9 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
  * Built-in dashboard themes.
  *
  * Each theme defines its own palette, typography, and layout so switching
- * themes produces visible changes beyond just color — fonts, density, and
- * corner-radius all shift to match the theme's personality.
+ * themes produces visible changes beyond just color.  Keep the English + Thai
+ * UI font stack readable across every built-in theme; theme personality should
+ * come from palette, density, and radius instead of novelty display fonts.
  *
  * Theme names must stay in sync with the backend's
  * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server.py`.
@@ -21,9 +22,17 @@ const SYSTEM_SANS =
 const SYSTEM_MONO =
   'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
 
+/** Readable dashboard stacks with Thai-safe fallbacks for plugin/localized UI. */
+const HERMES_READABLE_SANS =
+  '"Inter", "Noto Sans Thai", "IBM Plex Sans Thai", "IBM Plex Sans", ' + SYSTEM_SANS;
+const HERMES_READABLE_MONO = `"JetBrains Mono", ${SYSTEM_MONO}`;
+const HERMES_READABLE_FONT_URL =
+  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap";
+
 const DEFAULT_TYPOGRAPHY: ThemeTypography = {
-  fontSans: SYSTEM_SANS,
-  fontMono: SYSTEM_MONO,
+  fontSans: HERMES_READABLE_SANS,
+  fontMono: HERMES_READABLE_MONO,
+  fontUrl: HERMES_READABLE_FONT_URL,
   baseSize: "15px",
   lineHeight: "1.55",
   letterSpacing: "0",
@@ -40,14 +49,14 @@ const DEFAULT_LAYOUT: ThemeLayout = {
 
 export const defaultTheme: DashboardTheme = {
   name: "default",
-  label: "Hermes Teal",
-  description: "Classic dark teal — the canonical Hermes look",
+  label: "Hermes Slate",
+  description: "Readable slate dashboard — calmer, less game-like default",
   palette: {
-    background: { hex: "#041c1c", alpha: 1 },
-    midground: { hex: "#ffe6cb", alpha: 1 },
+    background: { hex: "#0f172a", alpha: 1 },
+    midground: { hex: "#e5edf7", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(255, 189, 56, 0.35)",
-    noiseOpacity: 1,
+    warmGlow: "rgba(59, 130, 246, 0.16)",
+    noiseOpacity: 0.2,
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,
@@ -67,10 +76,6 @@ export const midnightTheme: DashboardTheme = {
   },
   typography: {
     ...DEFAULT_TYPOGRAPHY,
-    fontSans: `"Inter", ${SYSTEM_SANS}`,
-    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap",
     letterSpacing: "-0.005em",
   },
   layout: {
@@ -92,10 +97,6 @@ export const emberTheme: DashboardTheme = {
   },
   typography: {
     ...DEFAULT_TYPOGRAPHY,
-    fontSans: `"Spectral", Georgia, "Times New Roman", serif`,
-    fontMono: `"IBM Plex Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;700&display=swap",
   },
   layout: {
     ...DEFAULT_LAYOUT,
@@ -120,10 +121,6 @@ export const monoTheme: DashboardTheme = {
   },
   typography: {
     ...DEFAULT_TYPOGRAPHY,
-    fontSans: `"IBM Plex Sans", ${SYSTEM_SANS}`,
-    fontMono: `"IBM Plex Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap",
   },
   layout: {
     ...DEFAULT_LAYOUT,
@@ -144,10 +141,6 @@ export const cyberpunkTheme: DashboardTheme = {
   },
   typography: {
     ...DEFAULT_TYPOGRAPHY,
-    fontSans: `"Share Tech Mono", "JetBrains Mono", ${SYSTEM_MONO}`,
-    fontMono: `"Share Tech Mono", "JetBrains Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=JetBrains+Mono:wght@400;700&display=swap",
   },
   layout: {
     ...DEFAULT_LAYOUT,
@@ -173,10 +166,6 @@ export const roseTheme: DashboardTheme = {
   },
   typography: {
     ...DEFAULT_TYPOGRAPHY,
-    fontSans: `"Fraunces", Georgia, serif`,
-    fontMono: `"DM Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=DM+Mono:wght@400;500&display=swap",
   },
   layout: {
     ...DEFAULT_LAYOUT,
@@ -214,8 +203,8 @@ export const nousBlueTheme: DashboardTheme = {
  */
 export const defaultLargeTheme: DashboardTheme = {
   name: "default-large",
-  label: "Hermes Teal (Large)",
-  description: "Hermes Teal with bigger fonts and roomier spacing",
+  label: "Hermes Slate (Large)",
+  description: "Hermes Slate with bigger fonts and roomier spacing",
   palette: defaultTheme.palette,
   typography: {
     ...DEFAULT_TYPOGRAPHY,
