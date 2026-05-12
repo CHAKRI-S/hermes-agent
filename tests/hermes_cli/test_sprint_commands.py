@@ -36,6 +36,9 @@ def test_run_sprint_auto_prompt_discovers_plan_and_worker():
     assert shortcut.usage is None
     assert "latest active unfinished plan" in shortcut.prompt
     assert "auto-select worker profile" in shortcut.prompt or "worker/profile" in shortcut.prompt
+    assert "not generic `delegate_task`" in shortcut.prompt
+    assert "/Users/tik/.hermes/scripts/profile_worker.py" in shortcut.prompt
+    assert "CheckinFlow" in shortcut.prompt
     assert "Execute exactly one sprint" in shortcut.prompt
     assert "Update the plan file" in shortcut.prompt
 
@@ -45,6 +48,8 @@ def test_continue_sprint_defaults_to_auto():
     assert shortcut.usage is None
     assert "Mode/args: auto" in shortcut.prompt
     assert "continue the latest active sprint plan" in shortcut.prompt
+    assert "not generic `delegate_task`" in shortcut.prompt
+    assert "/Users/tik/.hermes/scripts/profile_worker.py" in shortcut.prompt
 
 
 def test_auto_agent_requires_task_and_routes_profile():
@@ -55,4 +60,7 @@ def test_auto_agent_requires_task_and_routes_profile():
     assert shortcut.usage is None
     assert "Fix the login bug" in shortcut.prompt
     assert "coordinator-selected worker/profile" in shortcut.prompt
+    assert "not generic `delegate_task`" in shortcut.prompt
+    assert "Serena" in shortcut.prompt
+    assert "--scope both" in shortcut.prompt
     assert "Verify results" in shortcut.prompt

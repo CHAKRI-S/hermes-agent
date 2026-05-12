@@ -70,7 +70,10 @@ Requirements:
 - Do not require the user to provide a plan path or profile name.
 - Discover the active plan automatically, preferring this Discord channel/thread/project, then the most recently updated unfinished plan under `.hermes/plans/**`.
 - If multiple active plans are plausible, stop and ask with 2-3 compact choices.
-- Select the most suitable Hermes worker/profile automatically when useful; if no suitable profile is available or the sprint is tiny, use the current coordinator or a subagent as fallback.
+- Select the most suitable Hermes worker/profile automatically when useful; "profile" means a real Hermes profile launch such as `hermes -p backend-eng ...`, not generic `delegate_task`.
+- For coding/profile work, prefer `/Users/tik/.hermes/scripts/profile_worker.py` so profile-specific plugins/MCP such as Serena are actually loaded.
+- For CheckinFlow, default to `staging` and split API/Web work through the wrapper (`--scope api`, `--scope web`, or `--scope both`) using isolated temp worktrees.
+- Use generic `delegate_task` only for tiny reasoning/review subtasks where profile-specific config and Serena are irrelevant.
 - Execute exactly one sprint/checkpoint, not the whole plan.
 - Worker/profile instructions must be bounded to the selected sprint only and must stop before deploy, database migration, destructive commands, push main, gateway restart, secrets, or scope drift.
 - Coordinator must verify worker output before claiming success.
@@ -89,7 +92,10 @@ Requirements:
 - Load and follow `sprint-plan-executor`.
 - Do not require the user to provide a plan path or profile name.
 - Prefer the plan most recently reported/updated in this Discord channel/thread; otherwise discover the latest unfinished plan under the current project `.hermes/plans/**`.
-- Select the most suitable Hermes worker/profile automatically when useful; fallback to the current coordinator or subagent for tiny work.
+- Select the most suitable Hermes worker/profile automatically when useful; "profile" means a real Hermes profile launch such as `hermes -p frontend-eng ...`, not generic `delegate_task`.
+- For coding/profile work, prefer `/Users/tik/.hermes/scripts/profile_worker.py` so profile-specific plugins/MCP such as Serena are actually loaded.
+- For CheckinFlow, default to `staging` and split API/Web work through the wrapper (`--scope api`, `--scope web`, or `--scope both`) using isolated temp worktrees.
+- Use generic `delegate_task` only for tiny reasoning/review subtasks where profile-specific config and Serena are irrelevant.
 - Execute exactly the next sprint/checkpoint only.
 - Stop before approval-required operations: deploy, database migration, destructive commands, push main, gateway restart, credential/secret handling, or unclear scope.
 - Update the durable plan before final reply.
@@ -113,6 +119,10 @@ Requirements:
 - The coordinator chooses the best execution path; the user should not need to name a profile or plan path.
 - If this is more than a tiny one-shot, create or locate a sprint-gated plan first using `sprint-plan-executor`.
 - If a worker/profile is useful, select it automatically based on task type (UI/frontend, backend/API, QA, review/debug, ops) and bound it to a single sprint/task.
+- "Profile" means a real Hermes profile launch such as `hermes -p frontend-eng ...` or `hermes -p backend-eng ...`, not generic `delegate_task`.
+- For coding/profile work, prefer `/Users/tik/.hermes/scripts/profile_worker.py` so profile-specific plugins/MCP such as Serena are actually loaded.
+- For CheckinFlow, default to `staging` and split API/Web work through the wrapper (`--scope api`, `--scope web`, or `--scope both`) using isolated temp worktrees.
+- Use generic `delegate_task` only for tiny reasoning/review subtasks where profile-specific config and Serena are irrelevant.
 - If the task is tiny, the coordinator may execute it directly.
 - Stop before deploy, database migration, destructive commands, push main, gateway restart, credential/secret handling, or scope drift.
 - Verify results before reporting success.
