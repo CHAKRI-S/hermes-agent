@@ -92,10 +92,21 @@ const DENSITY_MULTIPLIERS: Record<ThemeDensity, string> = {
 };
 
 function typographyVars(typo: ThemeTypography): Record<string, string> {
+  const displayFont = typo.fontDisplay ?? typo.fontSans;
   return {
     "--theme-font-sans": typo.fontSans,
     "--theme-font-mono": typo.fontMono,
-    "--theme-font-display": typo.fontDisplay ?? typo.fontSans,
+    "--theme-font-display": displayFont,
+    // Tailwind / @nous-research/ui utilities resolve through these theme
+    // tokens. Mirror the dashboard vars here so persisted theme switches and
+    // third-party plugin components cannot bring back the novelty display
+    // fonts for regular English UI labels.
+    "--font-sans": typo.fontSans,
+    "--font-mono": typo.fontMono,
+    "--font-mondwest": displayFont,
+    "--font-expanded": displayFont,
+    "--font-compressed": displayFont,
+    "--font-courier": displayFont,
     "--theme-base-size": typo.baseSize,
     "--theme-line-height": typo.lineHeight,
     "--theme-letter-spacing": typo.letterSpacing,
