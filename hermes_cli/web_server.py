@@ -52,7 +52,7 @@ from gateway.status import get_running_pid, read_runtime_status
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
@@ -157,6 +157,20 @@ def _require_token(request: Request) -> None:
 _LOOPBACK_HOST_VALUES: frozenset = frozenset({
     "localhost", "127.0.0.1", "::1",
 })
+_PUBLIC_DASHBOARD_HOST_ALIASES: frozenset = frozenset(
+    h.strip().lower()
+    for h in os.getenv("HERMES_DASHBOARD_HOST_ALIASES", "").split(",")
+    if h.strip()
+)
+_PUBLIC_DASHBOARD_DOMAIN_REDIRECTS: Dict[str, str] = {}
+for _entry in os.getenv("HERMES_DASHBOARD_DOMAIN_REDIRECTS", "").split(","):
+    if "=" not in _entry:
+        continue
+    _host, _path = _entry.split("=", 1)
+    _host = _host.strip().lower()
+    _path = _path.strip()
+    if _host and _path.startswith("/"):
+        _PUBLIC_DASHBOARD_DOMAIN_REDIRECTS[_host] = _path
 
 
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:
@@ -187,6 +201,11 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     else:
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
+
+    # Explicit public aliases owned by this dashboard deployment.  These are
+    # used by Cloudflare Tunnel hostnames without overriding the Host header.
+    if host_only in _PUBLIC_DASHBOARD_HOST_ALIASES:
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -230,6 +249,32 @@ async def host_header_middleware(request: Request, call_next):
                     ),
                 },
             )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def public_plugin_domain_redirect_middleware(request: Request, call_next):
+    """Send dedicated plugin hostnames to their plugin tab root.
+
+    Cloudflare Tunnel can route ``mnemosyne.workinflow.cloud`` to this dashboard,
+    but it does not rewrite ``/`` to the plugin SPA route. Keep the alias local
+    and narrow so the normal Hermes dashboard host remains unchanged.
+    """
+    host_header = request.headers.get("host", "")
+    host_only = host_header.strip().lower()
+    if host_only.startswith("["):
+        close = host_only.find("]")
+        host_only = host_only[1:close] if close != -1 else host_only.strip("[]")
+    else:
+        host_only = host_only.rsplit(":", 1)[0] if ":" in host_only else host_only
+
+    redirect_path = _PUBLIC_DASHBOARD_DOMAIN_REDIRECTS.get(host_only)
+    if (
+        redirect_path
+        and request.method in ("GET", "HEAD")
+        and request.url.path in ("", "/")
+    ):
+        return RedirectResponse(url=redirect_path, status_code=307)
     return await call_next(request)
 
 
@@ -3639,8 +3684,8 @@ def mount_spa(application: FastAPI):
 # Built-in dashboard themes — label + description only.  The actual color
 # definitions live in the frontend (web/src/themes/presets.ts).
 _BUILTIN_DASHBOARD_THEMES = [
-    {"name": "default",       "label": "Hermes Teal",         "description": "Classic dark teal — the canonical Hermes look"},
-    {"name": "default-large", "label": "Hermes Teal (Large)", "description": "Hermes Teal with bigger fonts and roomier spacing"},
+    {"name": "default",       "label": "Hermes Slate",        "description": "Readable slate dashboard — calmer, less game-like default"},
+    {"name": "default-large", "label": "Hermes Slate (Large)", "description": "Hermes Slate with bigger fonts and roomier spacing"},
     {"name": "midnight",      "label": "Midnight",            "description": "Deep blue-violet with cool accents"},
     {"name": "ember",     "label": "Ember",          "description": "Warm crimson and bronze — forge vibes"},
     {"name": "mono",      "label": "Mono",           "description": "Clean grayscale — minimal and focused"},
@@ -3674,8 +3719,9 @@ def _parse_theme_layer(value: Any, default_hex: str, default_alpha: float = 1.0)
 
 
 _THEME_DEFAULT_TYPOGRAPHY: Dict[str, str] = {
-    "fontSans": 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    "fontSans": 'Inter, "Noto Sans Thai", "IBM Plex Sans Thai", "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
     "fontMono": 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace',
+    "fontUrl": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap",
     "baseSize": "15px",
     "lineHeight": "1.55",
     "letterSpacing": "0",
