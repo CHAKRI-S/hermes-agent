@@ -11,15 +11,11 @@ import fillerBgUrl from "@nous-research/ui/assets/filler-bg0.webp";
  * and the warm vignette both read theme-switchable CSS custom properties so
  * `ThemeProvider` can repaint the stack without remounting.
  *
- *   z-1   bg = `var(--background-base)`, mix-blend-mode driven by
- *         `--component-backdrop-bg-blend-mode` (default `difference`).
- *         Both LENS_0-style dark themes and the LENS_5I-style Nous Blue
- *         light theme keep `difference` here — the canvas is flipped by
- *         the z-200 FG inversion layer, not by changing this blend mode.
- *         The CSS var is exposed as a hook so future presets can override
- *         it (e.g. `multiply` to paint the bg as-is before inversion)
- *         without touching this component.
- *   z-2   bundled filler-bg WebP, inverted, opacity 0.033, difference
+ *   z-1   bg = `var(--background-base)`, blend mode driven by
+ *         `--component-backdrop-bg-blend-mode` (default `normal` for the
+ *         readable dashboard; inverted lens themes such as Nous Blue opt
+ *         into `difference` via component styles).
+ *   z-2   bundled filler-bg WebP, low opacity, default blend-mode: normal
  *   z-99  warm top-left vignette (`var(--warm-glow)`), opacity 0.22, lighten
  *   z-200 FG inversion = `var(--foreground)` (opaque white in LENS_5I,
  *         alpha-0 in LENS_0), mix-blend-mode: difference. This is the
@@ -51,7 +47,7 @@ export function Backdrop() {
           {
             backgroundColor: "var(--background-base)",
             mixBlendMode:
-              "var(--component-backdrop-bg-blend-mode, difference)",
+              "var(--component-backdrop-bg-blend-mode, normal)",
           } as unknown as React.CSSProperties
         }
       />
@@ -66,8 +62,8 @@ export function Backdrop() {
             // so the two don't double-darken. CSS var fallbacks keep the
             // default behaviour unchanged when no theme customises these.
             mixBlendMode:
-              "var(--component-backdrop-filler-blend-mode, difference)",
-            opacity: "var(--component-backdrop-filler-opacity, 0.033)",
+              "var(--component-backdrop-filler-blend-mode, normal)",
+            opacity: "var(--component-backdrop-filler-opacity, 0.015)",
             backgroundImage: "var(--theme-asset-bg)",
             backgroundSize: "var(--component-backdrop-background-size, cover)",
             backgroundPosition:
