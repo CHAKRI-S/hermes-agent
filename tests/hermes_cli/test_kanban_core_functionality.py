@@ -2692,6 +2692,84 @@ def test_build_worker_context_caps_huge_summary(kanban_home):
         conn.close()
 
 
+def test_build_worker_context_compact_is_tighter(kanban_home):
+    """Compact worker context keeps Claude bridge retries/comment storms small."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="compact context",
+            body="B" * 6000,
+            assignee="hermes-claude",
+        )
+        for i in range(8):
+            kb.claim_task(conn, tid)
+            kb._end_run(
+                conn,
+                tid,
+                outcome="reclaimed",
+                summary=f"attempt {i} " + ("S" * 3000),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', claim_lock=NULL, "
+                "claim_expires=NULL WHERE id=?", (tid,),
+            )
+            conn.commit()
+        for i in range(20):
+            kb.add_comment(conn, tid, author="u", body=f"comment {i} " + ("C" * 1500))
+
+        full = kb.build_worker_context(conn, tid)
+        compact = kb.build_worker_context(conn, tid, compact=True)
+
+        assert len(compact) < len(full)
+        assert compact.count("### Attempt ") == 3
+        assert "5 earlier attempt" in compact
+        body_count = sum(1 for line in compact.splitlines() if line.startswith("comment ") and "CCCC" in line)
+        assert body_count == 5
+        assert "15 earlier comment" in compact
+        assert "truncated" in compact
+    finally:
+        conn.close()
+
+
+def test_kanban_show_compact_mode_trims_tool_payload(kanban_home, monkeypatch):
+    """Claude compact mode also trims kanban_show JSON, not just worker_context."""
+    from tools import kanban_tools
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="compact show",
+            body="B" * 6000,
+            assignee="hermes-claude",
+        )
+        for i in range(6):
+            kb.claim_task(conn, tid)
+            kb._end_run(conn, tid, outcome="reclaimed", summary=f"attempt {i}")
+            conn.execute(
+                "UPDATE tasks SET status='ready', claim_lock=NULL, "
+                "claim_expires=NULL WHERE id=?", (tid,),
+            )
+            conn.commit()
+        for i in range(9):
+            kb.add_comment(conn, tid, author="u", body=f"comment {i}")
+
+        monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+        monkeypatch.setenv("HERMES_KANBAN_COMPACT_MODE", "claude")
+        payload = json.loads(kanban_tools._handle_show({}))
+
+        assert payload["compact"]["mode"] == "claude"
+        assert payload["compact"]["comments_shown"] == 5
+        assert payload["compact"]["comments_total"] == 9
+        assert payload["compact"]["runs_shown"] == 3
+        assert payload["compact"]["runs_total"] == 6
+        assert len(payload["task"]["body"]) < 5000
+        assert payload["worker_context"].count("### Attempt ") == 3
+    finally:
+        conn.close()
+
+
 def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
     """The dispatcher's _default_spawn must include --skills kanban-worker
     in its argv so every worker loads the skill automatically, even if
@@ -2739,6 +2817,57 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
+
+def test_default_spawn_uses_compact_toolsets_for_claude_bridge_profile(kanban_home, monkeypatch):
+    """Claude bridge workers should spawn with a narrow toolset surface.
+
+    The local Claude Code bridge receives every Hermes tool schema and then
+    forwards tool instructions to Claude, so dispatcher-spawned bridge workers
+    opt into compact mode by default to reduce quota burn.
+    """
+    profile_dir = kanban_home / "profiles" / "hermes-claude"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text(
+        "\n".join([
+            "model:",
+            "  default: claude-sonnet-4-6",
+            "  provider: custom",
+            "  base_url: http://127.0.0.1:8765/v1",
+            "  api_mode: chat_completions",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="claude compact", assignee="hermes-claude")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb._default_spawn(task, str(workspace))
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert "--toolsets" in cmd, cmd
+    toolsets_idx = cmd.index("--toolsets")
+    assert cmd[toolsets_idx + 1] == "kanban,terminal,file,skills"
+    assert toolsets_idx < cmd.index("chat"), cmd
+    env = captured["env"]
+    assert env["HERMES_KANBAN_COMPACT_MODE"] == "claude"
+    assert env["HERMES_KANBAN_COMPACT_TOOLSETS"] == "kanban,terminal,file,skills"
 
 
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):

@@ -139,6 +139,11 @@ _CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
 
+# Claude Code bridge profiles pay for every tool schema twice (Hermes → bridge
+# and bridge → `claude -p`). Keep dispatcher-spawned Claude workers on a lean
+# but still useful tool surface unless config opts out or overrides it.
+DEFAULT_CLAUDE_COMPACT_TOOLSETS = ("kanban", "terminal", "file", "skills")
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -4217,6 +4222,104 @@ def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
     return parsed if parsed >= minimum else default
 
 
+def _kanban_config() -> dict[str, Any]:
+    """Return the merged ``kanban`` config block, or ``{}`` on failure."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        return kanban_cfg if isinstance(kanban_cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _default_profile_root() -> Path:
+    """Return the shared Hermes root that owns the profiles directory."""
+    try:
+        from hermes_constants import get_default_hermes_root
+        return get_default_hermes_root()
+    except Exception:
+        return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+
+
+def _profile_config_path(profile: str) -> Path:
+    """Return the config.yaml path for a normalized profile name."""
+    root = _default_profile_root()
+    if profile == "default":
+        return root / "config.yaml"
+    return root / "profiles" / profile / "config.yaml"
+
+
+def _load_profile_config(profile: str) -> dict[str, Any]:
+    """Best-effort read of a profile config without activating the profile."""
+    path = _profile_config_path(profile)
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _profile_uses_claude_bridge(profile: str) -> bool:
+    """Heuristic for local Claude Code bridge-backed Hermes profiles.
+
+    The bridge is configured as a custom OpenAI-compatible provider with a
+    localhost ``/v1`` base URL and Claude model names. We avoid hard-coding a
+    single profile name so cloned Claude profiles get compact mode too.
+    """
+    cfg = _load_profile_config(profile)
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(model_cfg, dict):
+        return False
+    provider = str(model_cfg.get("provider") or "").lower()
+    model_name = str(model_cfg.get("default") or "").lower()
+    base_url = str(model_cfg.get("base_url") or "").lower().rstrip("/")
+    if provider != "custom" or "claude" not in model_name:
+        return False
+    return base_url in {
+        "http://127.0.0.1:8765/v1",
+        "http://localhost:8765/v1",
+    }
+
+
+def _claude_compact_toolsets_for_profile(profile: str) -> Optional[list[str]]:
+    """Return compact toolsets for a Claude bridge worker, or ``None``.
+
+    Config knobs live under ``kanban``:
+
+    - ``claude_compact_mode`` (default ``True``)
+    - ``claude_compact_toolsets`` (default ``kanban,terminal,file,skills``)
+    - ``claude_compact_profiles`` (optional explicit allow-list)
+    """
+    cfg = _kanban_config()
+    if cfg.get("claude_compact_mode", True) is False:
+        return None
+
+    explicit = cfg.get("claude_compact_profiles")
+    if explicit is not None:
+        if isinstance(explicit, str):
+            profiles = {p.strip().lower() for p in explicit.split(",") if p.strip()}
+        elif isinstance(explicit, (list, tuple, set)):
+            profiles = {str(p).strip().lower() for p in explicit if str(p).strip()}
+        else:
+            profiles = set()
+        if "*" not in profiles and profile not in profiles:
+            return None
+    elif not _profile_uses_claude_bridge(profile):
+        return None
+
+    raw_toolsets = cfg.get("claude_compact_toolsets", DEFAULT_CLAUDE_COMPACT_TOOLSETS)
+    if isinstance(raw_toolsets, str):
+        items = [t.strip() for t in raw_toolsets.split(",")]
+    elif isinstance(raw_toolsets, (list, tuple, set)):
+        items = [str(t).strip() for t in raw_toolsets]
+    else:
+        items = list(DEFAULT_CLAUDE_COMPACT_TOOLSETS)
+    toolsets = [t for t in items if t]
+    return toolsets or list(DEFAULT_CLAUDE_COMPACT_TOOLSETS)
+
+
 def worker_log_rotation_config(kanban_cfg: Optional[dict] = None) -> tuple[int, int]:
     """Return ``(rotate_bytes, backup_count)`` for worker log rotation.
 
@@ -4523,6 +4626,8 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
+    compact_toolsets = _claude_compact_toolsets_for_profile(profile_arg)
+
     cmd = [
         *_resolve_hermes_argv(),
         "-p", profile_arg,
@@ -4531,6 +4636,12 @@ def _default_spawn(
         # dispatcher's root allowlist. Pass --accept-hooks explicitly so
         # profile-local worker sessions still register configured hooks.
         "--accept-hooks",
+    ]
+    if compact_toolsets:
+        cmd.extend(["--toolsets", ",".join(compact_toolsets)])
+        env["HERMES_KANBAN_COMPACT_MODE"] = "claude"
+        env["HERMES_KANBAN_COMPACT_TOOLSETS"] = ",".join(compact_toolsets)
+    cmd.extend([
         # Auto-load the kanban-worker skill so every dispatched worker
         # has the pattern library (good summary/metadata shapes, retry
         # diagnostics, block-reason examples) in its context, even if
@@ -4540,7 +4651,7 @@ def _default_spawn(
         # at a different/additional skill via config if they want —
         # --skills is additive to the profile's default skill set.
         "--skills", "kanban-worker",
-    ]
+    ])
     # Per-task force-loaded skills. Each name goes in its own
     # `--skills X` pair rather than a single comma-joined arg: the CLI
     # accepts both forms (action='append' + comma-split), but
@@ -4658,7 +4769,12 @@ def run_daemon(
 # Worker context builder (what a spawned worker sees)
 # ---------------------------------------------------------------------------
 
-def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
+def build_worker_context(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    compact: bool = False,
+) -> str:
     """Return the full text a worker should read to understand its task.
 
     Order:
@@ -4685,10 +4801,19 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     if not task:
         raise ValueError(f"unknown task {task_id}")
 
-    def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
+    field_limit = 2 * 1024 if compact else _CTX_MAX_FIELD_BYTES
+    body_limit = 4 * 1024 if compact else _CTX_MAX_BODY_BYTES
+    comment_limit = 1024 if compact else _CTX_MAX_COMMENT_BYTES
+    prior_attempt_limit = 3 if compact else _CTX_MAX_PRIOR_ATTEMPTS
+    comment_count_limit = 5 if compact else _CTX_MAX_COMMENTS
+    role_history_limit = 3 if compact else 5
+
+    def _cap(s: Optional[str], limit: Optional[int] = None) -> str:
         """Truncate a string to `limit` chars with a visible ellipsis."""
         if not s:
             return ""
+        if limit is None:
+            limit = field_limit
         s = s.strip()
         if len(s) <= limit:
             return s
@@ -4715,7 +4840,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
 
     if task.body and task.body.strip():
         lines.append("## Body")
-        lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
+        lines.append(_cap(task.body, body_limit))
         lines.append("")
 
     # Prior attempts — show closed runs so a retrying worker sees the
@@ -4725,9 +4850,9 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     # more exist without bloating the prompt.
     all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
     # list_runs returns ascending by started_at; "most recent" = last N
-    if len(all_prior) > _CTX_MAX_PRIOR_ATTEMPTS:
-        omitted = len(all_prior) - _CTX_MAX_PRIOR_ATTEMPTS
-        shown = all_prior[-_CTX_MAX_PRIOR_ATTEMPTS:]
+    if len(all_prior) > prior_attempt_limit:
+        omitted = len(all_prior) - prior_attempt_limit
+        shown = all_prior[-prior_attempt_limit:]
         first_shown_idx = omitted + 1
     else:
         omitted = 0
@@ -4811,8 +4936,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
             "WHERE r.profile = ? AND r.task_id != ? "
             "  AND r.outcome = 'completed' "
-            "ORDER BY r.ended_at DESC LIMIT 5",
-            (task.assignee, task_id),
+            "ORDER BY r.ended_at DESC LIMIT ?",
+            (task.assignee, task_id, role_history_limit),
         ).fetchall()
         if role_rows:
             lines.append(f"## Recent work by @{task.assignee}")
@@ -4829,9 +4954,9 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     # comment-storm tasks don't blow out the worker's prompt. Older
     # comments summarised in a one-line marker like prior attempts.
     all_comments = list_comments(conn, task_id)
-    if len(all_comments) > _CTX_MAX_COMMENTS:
-        omitted_c = len(all_comments) - _CTX_MAX_COMMENTS
-        shown_c = all_comments[-_CTX_MAX_COMMENTS:]
+    if len(all_comments) > comment_count_limit:
+        omitted_c = len(all_comments) - comment_count_limit
+        shown_c = all_comments[-comment_count_limit:]
     else:
         omitted_c = 0
         shown_c = all_comments
@@ -4852,7 +4977,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             # was already closed in #22435. See #22452.
             safe_author = (c.author or "").replace("`", "")
             lines.append(f"comment from worker `{safe_author}` at {ts}:")
-            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+            lines.append(_cap(c.body, comment_limit))
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

@@ -1554,6 +1554,15 @@ DEFAULT_CONFIG = {
         # large bulk-load of triage tasks from spending a burst of aux
         # LLM calls in one tick. Excess tasks defer to the next tick.
         "auto_decompose_per_tick": 3,
+        # Claude Code bridge-backed profiles pay for every tool schema twice
+        # (Hermes -> bridge -> claude CLI). Dispatcher-spawned workers using
+        # the local bridge default to a compact tool surface that still keeps
+        # lifecycle, file/code, terminal, and skills tools available.
+        "claude_compact_mode": True,
+        "claude_compact_toolsets": ["kanban", "terminal", "file", "skills"],
+        # Optional allow-list override. When unset, bridge profiles are detected
+        # from their custom localhost /v1 provider + Claude model name.
+        "claude_compact_profiles": None,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

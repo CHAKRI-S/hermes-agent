@@ -236,6 +236,35 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
     }
 
 
+def _compact_mode() -> bool:
+    """True for dispatcher-spawned Claude bridge workers in compact mode."""
+    return os.environ.get("HERMES_KANBAN_COMPACT_MODE") == "claude"
+
+
+def _cap_text(value: Optional[str], limit: int) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"… [truncated, {len(text) - limit} chars omitted]"
+
+
+def _cap_json_value(value: Any, limit: int = 2048) -> Any:
+    """Keep compact-mode tool payload fields small while preserving shape."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _cap_text(value, limit)
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        encoded = str(value)
+    if len(encoded) <= limit:
+        return value
+    return {"_truncated": _cap_text(encoded, limit)}
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -259,10 +288,16 @@ def _handle_show(args: dict, **kw) -> str:
             runs = kb.list_runs(conn, tid)
             parents = kb.parent_ids(conn, tid)
             children = kb.child_ids(conn, tid)
+            compact = _compact_mode()
+
+            shown_comments = comments[-5:] if compact else comments
+            shown_events = events[-20:] if compact else events[-50:]
+            shown_runs = runs[-3:] if compact else runs
 
             def _task_dict(t):
                 return {
-                    "id": t.id, "title": t.title, "body": t.body,
+                    "id": t.id, "title": t.title,
+                    "body": _cap_text(t.body, 4096) if compact else t.body,
                     "assignee": t.assignee, "status": t.status,
                     "tenant": t.tenant, "priority": t.priority,
                     "workspace_kind": t.workspace_kind,
@@ -270,7 +305,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "created_by": t.created_by, "created_at": t.created_at,
                     "started_at": t.started_at,
                     "completed_at": t.completed_at,
-                    "result": t.result,
+                    "result": _cap_text(t.result, 2048) if compact else t.result,
                     "current_run_id": t.current_run_id,
                 }
 
@@ -278,32 +313,46 @@ def _handle_show(args: dict, **kw) -> str:
                 return {
                     "id": r.id, "profile": r.profile,
                     "status": r.status, "outcome": r.outcome,
-                    "summary": r.summary, "error": r.error,
-                    "metadata": r.metadata,
+                    "summary": _cap_text(r.summary, 2048) if compact else r.summary,
+                    "error": _cap_text(r.error, 2048) if compact else r.error,
+                    "metadata": _cap_json_value(r.metadata) if compact else r.metadata,
                     "started_at": r.started_at, "ended_at": r.ended_at,
                 }
 
-            return json.dumps({
+            payload = {
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
                 "comments": [
-                    {"author": c.author, "body": c.body,
+                    {"author": c.author,
+                     "body": _cap_text(c.body, 1024) if compact else c.body,
                      "created_at": c.created_at}
-                    for c in comments
+                    for c in shown_comments
                 ],
                 "events": [
-                    {"kind": e.kind, "payload": e.payload,
+                    {"kind": e.kind,
+                     "payload": _cap_json_value(e.payload) if compact else e.payload,
                      "created_at": e.created_at, "run_id": e.run_id}
-                    for e in events[-50:]   # cap; full log via CLI
+                    for e in shown_events
                 ],
-                "runs": [_run_dict(r) for r in runs],
+                "runs": [_run_dict(r) for r in shown_runs],
                 # Also surface the worker's own context block so the
                 # agent can include it directly if it wants. This is
                 # the same string build_worker_context returns to the
                 # dispatcher at spawn time.
-                "worker_context": kb.build_worker_context(conn, tid),
-            })
+                "worker_context": kb.build_worker_context(conn, tid, compact=compact),
+            }
+            if compact:
+                payload["compact"] = {
+                    "mode": "claude",
+                    "comments_shown": len(shown_comments),
+                    "comments_total": len(comments),
+                    "events_shown": len(shown_events),
+                    "events_total": len(events),
+                    "runs_shown": len(shown_runs),
+                    "runs_total": len(runs),
+                }
+            return json.dumps(payload)
         finally:
             conn.close()
     except Exception as e:
