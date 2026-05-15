@@ -249,6 +249,54 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_direct_background_notification_prefers_session_origin_over_stale_metadata(
+    monkeypatch, tmp_path
+):
+    """Text-only watcher notifications must not fall back to foreground/stale chat metadata."""
+    import tools.process_registry as pr_module
+    from gateway.session import SessionSource
+
+    sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner.session_store._entries["agent:main:telegram:group:-100:42"] = SimpleNamespace(
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-100",
+            chat_type="group",
+            thread_id="42",
+            user_id="proc_owner",
+            user_name="alice",
+        )
+    )
+
+    await runner._run_process_watcher(
+        {
+            "session_id": "proc_direct_cross_room",
+            "check_interval": 0,
+            "session_key": "agent:main:telegram:group:-100:42",
+            "platform": "telegram",
+            # Simulates stale foreground/current-room metadata copied from the
+            # wrong context. The session origin must win.
+            "chat_id": "999",
+            "thread_id": "99",
+            "notify_on_complete": False,
+        }
+    )
+
+    adapter.send.assert_awaited_once()
+    args, kwargs = adapter.send.await_args
+    assert args[0] == "-100"
+    assert kwargs["metadata"] == {"thread_id": "42"}
+
+
+@pytest.mark.asyncio
 async def test_inject_watch_notification_routes_from_session_store_origin(monkeypatch, tmp_path):
     from gateway.session import SessionSource
 

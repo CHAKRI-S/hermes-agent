@@ -4360,6 +4360,47 @@ class BasePlatformAdapter(ABC):
             return
         del self._active_sessions[session_key]
 
+    def _source_session_key(self, source: SessionSource) -> str:
+        """Return the adapter/session-store key for a message source.
+
+        Keep this in one place so routing guards use the exact same options as
+        ``handle_message``. A mismatch here means a background task is trying
+        to deliver an event through a session slot that does not own that
+        event's origin — the safest action is to drop the response rather than
+        risk sending stale context into the wrong chat/thread.
+        """
+        return build_session_key(
+            source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+
+    def _event_source_matches_session_key(self, event: MessageEvent, session_key: str) -> bool:
+        """Validate that ``event.source`` still belongs to ``session_key``."""
+        if not session_key or event is None or getattr(event, "source", None) is None:
+            return False
+        try:
+            actual_key = self._source_session_key(event.source)
+        except Exception:
+            logger.warning(
+                "[%s] Could not build source session key; dropping response for claimed session %s",
+                self.name,
+                session_key,
+                exc_info=True,
+            )
+            return False
+        if actual_key == session_key:
+            return True
+        logger.warning(
+            "[%s] Routing guard blocked cross-session response: claimed=%s actual=%s chat=%s thread=%s",
+            self.name,
+            session_key,
+            actual_key,
+            getattr(event.source, "chat_id", ""),
+            getattr(event.source, "thread_id", None) or "",
+        )
+        return False
+
     def _session_task_is_stale(self, session_key: str) -> bool:
         """Return True if the owner task for ``session_key`` is done/cancelled.
 
@@ -4818,6 +4859,22 @@ class BasePlatformAdapter(ABC):
             delivery_attempted = True
             if getattr(result, "success", False):
                 delivery_succeeded = True
+
+        # Re-validate route ownership inside the background task.  Normal
+        # handle_message() calls pass a matching key, but late drains,
+        # synthetic events, or tests can accidentally hand an event from chat A
+        # to chat B's session slot.  Drop before typing/agent/send side effects.
+        if not self._event_source_matches_session_key(event, session_key):
+            await self._run_processing_hook(
+                "on_processing_complete",
+                event,
+                ProcessingOutcome.CANCELLED,
+            )
+            current_task = asyncio.current_task()
+            if current_task is not None and self._session_tasks.get(session_key) is current_task:
+                del self._session_tasks[session_key]
+            self._release_session_guard(session_key)
+            return
 
         # Reuse the interrupt event set by handle_message() (which marks
         # the session active before spawning this task to prevent races).
