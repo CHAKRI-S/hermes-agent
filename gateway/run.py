@@ -13753,9 +13753,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 derived_chat_type = _parsed["chat_type"]
                 derived_chat_id = _parsed["chat_id"]
 
-        platform_name = str(evt.get("platform") or derived_platform or "").strip().lower()
-        chat_type = str(evt.get("chat_type") or derived_chat_type or "").strip().lower()
-        chat_id = str(evt.get("chat_id") or derived_chat_id or "").strip()
+        evt_platform = str(evt.get("platform") or "").strip().lower()
+        evt_chat_type = str(evt.get("chat_type") or "").strip().lower()
+        evt_chat_id = str(evt.get("chat_id") or "").strip()
+        # If a session_key is present, treat it as authoritative over watcher
+        # metadata.  The watcher metadata is copied from session env at process
+        # start and may be stale after a session split; preferring it is the
+        # exact failure mode that can deliver background notifications to the
+        # foreground/current room instead of the process origin.
+        if derived_platform and evt_platform and evt_platform != derived_platform:
+            logger.warning(
+                "Synthetic process event route mismatch for %s: platform metadata=%s session_key=%s; using session_key",
+                evt.get("session_id", "unknown"), evt_platform, derived_platform,
+            )
+        if derived_chat_type and evt_chat_type and evt_chat_type != derived_chat_type:
+            logger.warning(
+                "Synthetic process event route mismatch for %s: chat_type metadata=%s session_key=%s; using session_key",
+                evt.get("session_id", "unknown"), evt_chat_type, derived_chat_type,
+            )
+        if derived_chat_id and evt_chat_id and evt_chat_id != derived_chat_id:
+            logger.warning(
+                "Synthetic process event route mismatch for %s: chat metadata=%s session_key=%s; using session_key",
+                evt.get("session_id", "unknown"), evt_chat_id, derived_chat_id,
+            )
+        platform_name = derived_platform or evt_platform
+        chat_type = derived_chat_type or evt_chat_type
+        chat_id = derived_chat_id or evt_chat_id
         if not platform_name or not chat_type or not chat_id:
             return None
 
@@ -13921,6 +13944,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent_notify = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
 
+        def _watcher_direct_source() -> Optional[SessionSource]:
+            """Resolve direct watcher sends from the process origin, not foreground metadata."""
+            if session_key:
+                source = self._build_process_event_source({
+                    "session_id": session_id,
+                    "session_key": session_key,
+                    "platform": platform_name,
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                })
+                if source is None:
+                    logger.warning(
+                        "Dropping background process notification with unsafe route metadata for process %s session=%s",
+                        session_id,
+                        session_key,
+                    )
+                return source
+            if not platform_name or not chat_id:
+                return None
+            try:
+                platform = Platform(str(platform_name).strip().lower())
+            except Exception:
+                logger.warning(
+                    "Dropping background process notification with invalid platform metadata for process %s: %r",
+                    session_id,
+                    platform_name,
+                )
+                return None
+            return SessionSource(
+                platform=platform,
+                chat_id=chat_id,
+                chat_type=str(watcher.get("chat_type") or "dm"),
+                thread_id=thread_id or None,
+                user_id=user_id or None,
+                user_name=user_name or None,
+            )
+
         logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                       session_id, interval, notify_mode, agent_notify)
 
@@ -14033,18 +14095,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         f"[Background process {session_id} finished with exit code {session.exit_code}~ "
                         f"Here's the final output:\n{new_output}]"
                     )
+                    source = _watcher_direct_source()
                     adapter = None
-                    for p, a in self.adapters.items():
-                        if p.value == platform_name:
-                            adapter = a
-                            break
-                    if adapter and chat_id:
+                    if source is not None:
+                        for p, a in self.adapters.items():
+                            if p == source.platform:
+                                adapter = a
+                                break
+                    if adapter and source and source.chat_id:
                         try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
+                            send_meta = {"thread_id": source.thread_id} if source.thread_id else None
                             await adapter.send(
-                                chat_id,
+                                source.chat_id,
                                 message_text,
-                                metadata=_non_conversational_metadata(send_meta, platform=platform_name),
+                                metadata=_non_conversational_metadata(send_meta, platform=source.platform),
                             )
                         except Exception as e:
                             logger.error("Watcher delivery error: %s", e)
@@ -14058,18 +14122,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"[Background process {session_id} is still running~ "
                     f"New output:\n{new_output}]"
                 )
+                source = _watcher_direct_source()
                 adapter = None
-                for p, a in self.adapters.items():
-                    if p.value == platform_name:
-                        adapter = a
-                        break
-                if adapter and chat_id:
+                if source is not None:
+                    for p, a in self.adapters.items():
+                        if p == source.platform:
+                            adapter = a
+                            break
+                if adapter and source and source.chat_id:
                     try:
-                        send_meta = {"thread_id": thread_id} if thread_id else None
+                        send_meta = {"thread_id": source.thread_id} if source.thread_id else None
                         await adapter.send(
-                            chat_id,
+                            source.chat_id,
                             message_text,
-                            metadata=_non_conversational_metadata(send_meta, platform=platform_name),
+                            metadata=_non_conversational_metadata(send_meta, platform=source.platform),
                         )
                     except Exception as e:
                         logger.error("Watcher delivery error: %s", e)

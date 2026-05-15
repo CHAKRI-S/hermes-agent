@@ -20,6 +20,7 @@ class StubAdapter(BasePlatformAdapter):
 
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True, token="test"), Platform.TELEGRAM)
+        self.sent = []
 
     async def connect(self, *, is_reconnect: bool = False):
         return True
@@ -28,6 +29,7 @@ class StubAdapter(BasePlatformAdapter):
         pass
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent.append({"chat_id": chat_id, "content": content, "metadata": metadata})
         return SendResult(success=True, message_id="1")
 
     async def send_typing(self, chat_id, metadata=None):
@@ -149,3 +151,27 @@ class TestInterruptKeyConsistency:
         assert queued is event
         assert queued.media_urls == ["/tmp/photo-a.jpg"]
         assert interrupt_event.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_process_background_drops_cross_session_event_before_delivery(self):
+        """A handler task must not deliver an event whose source belongs to another session."""
+        adapter = StubAdapter()
+        handler_called = False
+
+        async def _handler(_event):
+            nonlocal handler_called
+            handler_called = True
+            return "leaked response"
+
+        adapter.set_message_handler(_handler)
+        event = MessageEvent(text="hello", source=_source("chat-a", "dm"), message_id="1")
+        wrong_session_key = build_session_key(_source("chat-b", "dm"))
+        adapter._active_sessions[wrong_session_key] = asyncio.Event()
+        adapter._session_tasks[wrong_session_key] = asyncio.current_task()
+
+        await adapter._process_message_background(event, wrong_session_key)
+
+        assert handler_called is False
+        assert adapter.sent == []
+        assert wrong_session_key not in adapter._active_sessions
+        assert wrong_session_key not in adapter._session_tasks
