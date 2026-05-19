@@ -163,11 +163,16 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
 
 
 def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
-    """Return the OLDEST pending clarify entry for a session, or None.
+    """Return the OLDEST text-awaiting clarify entry for a session, or None.
 
     Used by the text-fallback intercept in ``_handle_message`` — when a
     clarify is awaiting a free-form text response, the next user message
     in that session is captured as the answer.
+
+    Multi-choice button prompts are pending too, but they are not returned
+    here until the user picks ``Other``.  Use ``get_any_pending_for_session``
+    when the caller only needs to know whether *any* clarify prompt is
+    blocking the session.
     """
     with _lock:
         ids = _session_index.get(session_key) or []
@@ -176,6 +181,23 @@ def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
             if entry is None:
                 continue
             if entry.awaiting_text:
+                return entry
+        return None
+
+
+def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
+    """Return the OLDEST pending clarify entry for a session, or None.
+
+    Unlike ``get_pending_for_session()``, this includes multi-choice button
+    prompts that are still waiting for a button click.  Gateway busy-session
+    guards use this to avoid queueing or interrupting while a clarify prompt
+    is already blocking the active agent thread.
+    """
+    with _lock:
+        ids = _session_index.get(session_key) or []
+        for cid in ids:
+            entry = _entries.get(cid)
+            if entry is not None:
                 return entry
         return None
 
