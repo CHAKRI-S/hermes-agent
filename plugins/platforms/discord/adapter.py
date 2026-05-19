@@ -247,6 +247,47 @@ def _looks_like_nonconversational_history_message(content: str) -> bool:
     return any(pattern.match(text) for pattern in _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS)
 
 
+def _coerce_nonnegative_timeout(value: Any, default: int) -> int:
+    """Return a non-negative integer timeout, falling back on bad config."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_discord_exec_approval_view_timeout() -> int:
+    """Timeout for Discord dangerous-command approval buttons.
+
+    Must match tools.approval's gateway wait timeout so buttons do not expire
+    before the blocked agent thread stops waiting, especially when the user
+    configures ``approvals.gateway_timeout`` above the 5-minute default.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        approvals = cfg.get("approvals", {}) or {}
+        return _coerce_nonnegative_timeout(
+            approvals.get("gateway_timeout", 300),
+            300,
+        )
+    except Exception:
+        return 300
+
+
+def _get_discord_clarify_view_timeout() -> int:
+    """Timeout for Discord clarify choice buttons.
+
+    Must match tools.clarify_gateway.wait_for_response's timeout source so
+    multiple-choice prompts remain answerable for the whole interval the agent
+    is waiting.  The backend default is 600s via ``agent.clarify_timeout``.
+    """
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+        return _coerce_nonnegative_timeout(get_clarify_timeout(), 600)
+    except Exception:
+        return 600
+
+
 def _clean_discord_id(entry: str) -> str:
     """Strip common prefixes from a Discord user ID or username entry.
 
@@ -5267,6 +5308,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                timeout_seconds=_get_discord_exec_approval_view_timeout(),
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -5414,6 +5456,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    timeout_seconds=_get_discord_clarify_view_timeout(),
                 )
             else:
                 embed.add_field(
@@ -6395,7 +6438,8 @@ def _define_discord_view_classes() -> None:
         Shows four buttons: Allow Once, Allow Session, Always Allow, Deny.
         Clicking a button calls ``resolve_gateway_approval()`` to unblock the
         waiting agent thread — the same mechanism as the text ``/approve`` flow.
-        Only users in the allowed list can click.  Times out after 5 minutes.
+        Only users in the allowed list can click.  Times out when the matching
+        gateway approval wait expires.
         """
 
         def __init__(
@@ -6403,8 +6447,15 @@ def _define_discord_view_classes() -> None:
             session_key: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            timeout_seconds: Optional[int] = None,
         ):
-            super().__init__(timeout=300)  # 5-minute timeout
+            super().__init__(
+                timeout=(
+                    _get_discord_exec_approval_view_timeout()
+                    if timeout_seconds is None
+                    else timeout_seconds
+                )
+            )
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
@@ -7052,8 +7103,15 @@ def _define_discord_view_classes() -> None:
             clarify_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            timeout_seconds: Optional[int] = None,
         ):
-            super().__init__(timeout=300)  # 5-minute timeout
+            super().__init__(
+                timeout=(
+                    _get_discord_clarify_view_timeout()
+                    if timeout_seconds is None
+                    else timeout_seconds
+                )
+            )
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
@@ -7144,35 +7202,10 @@ def _define_discord_view_classes() -> None:
                 )
                 return
 
-            self.resolved = True
-            for child in self.children:
-                child.disabled = True
-
-            embed = interaction.message.embeds[0] if (
-                interaction.message and interaction.message.embeds
-            ) else None
-            if embed:
-                user = getattr(interaction, "user", None)
-                display_name = getattr(user, "display_name", "user")
-                embed.color = discord.Color.green()
-                embed.set_footer(text=f"Answered by {display_name}: {choice}")
-
-            try:
-                await interaction.response.edit_message(embed=embed, view=self)
-            except Exception:
-                logger.debug(
-                    "Discord clarify edit_message failed for %s",
-                    self.clarify_id,
-                    exc_info=True,
-                )
-                try:
-                    await interaction.response.defer()
-                except Exception:
-                    pass
-
-            # Resolve via the gateway clarify primitive — same mechanism as
-            # Telegram. Look up the canonical choice text from the entry so
-            # we round-trip the original value, not a button-label variant.
+            # Resolve via the gateway clarify primitive before editing the
+            # message.  If the entry has already timed out or been cancelled,
+            # do not mark the prompt as answered in Discord — tell the user
+            # the button is stale instead.
             resolved_text: Optional[str] = None
             try:
                 from tools.clarify_gateway import _entries as _clarify_entries  # type: ignore
@@ -7198,6 +7231,39 @@ def _define_discord_view_classes() -> None:
                     "Discord clarify resolve_gateway_clarify failed (id=%s): %s",
                     self.clarify_id, exc,
                 )
+                resolved = False
+
+            if not resolved:
+                await interaction.response.send_message(
+                    "This prompt has expired or was cancelled~", ephemeral=True,
+                )
+                return
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+
+            embed = interaction.message.embeds[0] if (
+                interaction.message and interaction.message.embeds
+            ) else None
+            if embed:
+                user = getattr(interaction, "user", None)
+                display_name = getattr(user, "display_name", "user")
+                embed.color = discord.Color.green()
+                embed.set_footer(text=f"Answered by {display_name}: {choice}")
+
+            try:
+                await interaction.response.edit_message(embed=embed, view=self)
+            except Exception:
+                logger.debug(
+                    "Discord clarify edit_message failed for %s",
+                    self.clarify_id,
+                    exc_info=True,
+                )
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
 
         async def _on_other(self, interaction: "discord.Interaction") -> None:
             """Flip the clarify entry into text-capture mode."""

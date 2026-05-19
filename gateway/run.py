@@ -7938,36 +7938,67 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _update_prompts.pop(_quick_key, None)
 
-        # Intercept messages that are responses to a pending clarify
-        # request that is awaiting free-form text (either an open-ended
-        # clarify with no choices, or one where the user picked the
-        # "Other" button).  The first non-empty user message in the
-        # session resolves the clarify and unblocks the agent thread —
-        # we do NOT route it to the agent as a new turn.
+        # Intercept messages that are responses to a pending clarify request.
+        #
+        # Text-awaiting clarifies (open-ended, text fallback, or after the
+        # user picked "Other") capture the next non-command message as the
+        # answer.  Multi-choice button prompts are also considered pending:
+        # if the user types an option number/text while the buttons are still
+        # visible, resolve the prompt; otherwise keep the prompt active and
+        # do NOT route the message into busy queue/interrupt handling.
         try:
             from tools import clarify_gateway as _clarify_mod
-            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            _pending_clarify = _clarify_mod.get_any_pending_for_session(_quick_key)
         except Exception:
+            _clarify_mod = None
             _pending_clarify = None
-        if _pending_clarify is not None:
+        if _pending_clarify is not None and _clarify_mod is not None:
             _raw_clarify_reply = (event.text or "").strip()
             # Skip slash commands — the user clearly wanted to issue a
             # command, not answer the clarify.  Leave the clarify pending
             # so the user can retry; if it times out, the agent unblocks
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
-                _resolved = _clarify_mod.resolve_gateway_clarify(
-                    _pending_clarify.clarify_id, _raw_clarify_reply,
-                )
-                if _resolved:
+                _resolved_value = None
+                if getattr(_pending_clarify, "awaiting_text", False):
+                    _resolved_value = _raw_clarify_reply
+                else:
+                    _choices = list(getattr(_pending_clarify, "choices", None) or [])
+                    if _choices:
+                        if _raw_clarify_reply.isdigit():
+                            _idx = int(_raw_clarify_reply) - 1
+                            if 0 <= _idx < len(_choices):
+                                _resolved_value = _choices[_idx]
+                        if _resolved_value is None:
+                            _reply_norm = _raw_clarify_reply.casefold()
+                            for _choice in _choices:
+                                if str(_choice).casefold() == _reply_norm:
+                                    _resolved_value = str(_choice)
+                                    break
+
+                if _resolved_value is not None:
+                    _resolved = _clarify_mod.resolve_gateway_clarify(
+                        _pending_clarify.clarify_id, _resolved_value,
+                    )
+                    if _resolved:
+                        logger.info(
+                            "Gateway intercepted clarify text response (session=%s, id=%s)",
+                            _quick_key, _pending_clarify.clarify_id,
+                        )
+                        # Acknowledge with empty string so adapters that emit
+                        # the agent's response don't double-post.  The agent
+                        # itself will produce the next user-facing message.
+                        return ""
+                else:
                     logger.info(
-                        "Gateway intercepted clarify text response (session=%s, id=%s)",
+                        "Gateway held message during pending clarify choice prompt "
+                        "(session=%s, id=%s)",
                         _quick_key, _pending_clarify.clarify_id,
                     )
-                    # Acknowledge with empty string so adapters that emit
-                    # the agent's response don't double-post.  The agent
-                    # itself will produce the next user-facing message.
-                    return ""
+                    return (
+                        "A clarify question is still pending. Please click a button, "
+                        "type the option number/text, or use `/stop` to cancel."
+                    )
 
         # Intercept messages that are responses to a pending /reload-mcp
         # (or future) slash-confirm prompt.  Recognized confirm replies are

@@ -63,6 +63,9 @@ class TestClarifyPrimitive:
         entry = cm.register("id3", "sk3", "Pick", ["X", "Y"])
         assert entry.awaiting_text is False
         assert cm.get_pending_for_session("sk3") is None
+        any_pending = cm.get_any_pending_for_session("sk3")
+        assert any_pending is not None
+        assert any_pending.clarify_id == "id3"
 
     def test_other_button_flips_to_text_mode(self):
         """mark_awaiting_text makes get_pending_for_session find the entry."""

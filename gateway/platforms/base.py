@@ -4429,15 +4429,15 @@ class BasePlatformAdapter(ABC):
             if not cmd:
                 try:
                     from tools import clarify_gateway as _clarify_mod
-                    _has_text_clarify = (
-                        _clarify_mod.get_pending_for_session(session_key) is not None
+                    _has_pending_clarify = (
+                        _clarify_mod.get_any_pending_for_session(session_key) is not None
                     )
                 except Exception:
-                    _has_text_clarify = False
+                    _has_pending_clarify = False
 
-                if _has_text_clarify:
+                if _has_pending_clarify:
                     logger.debug(
-                        "[%s] Routing message to clarify text-intercept for %s",
+                        "[%s] Routing message to clarify intercept for %s",
                         self.name, session_key,
                     )
                     try:
