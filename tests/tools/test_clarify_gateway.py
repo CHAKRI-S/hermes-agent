@@ -63,6 +63,9 @@ class TestClarifyPrimitive:
         entry = cm.register("id3", "sk3", "Pick", ["X", "Y"])
         assert entry.awaiting_text is False
         assert cm.get_pending_for_session("sk3") is None
+        any_pending = cm.get_any_pending_for_session("sk3")
+        assert any_pending is not None
+        assert any_pending.clarify_id == "id3"
 
     def test_include_choice_prompts_returns_multi_choice_entry(self):
         """Gateway typed replies must see active choice prompts too."""

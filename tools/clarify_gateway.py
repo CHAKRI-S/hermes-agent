@@ -170,11 +170,14 @@ def get_pending_for_session(
     """Return the oldest pending clarify entry for a session, or None.
 
     By default this only returns entries awaiting free-form text (open-ended
-    clarifies, or a multi-choice clarify after the user picked ``Other``).
-    Gateways may pass ``include_choice_prompts=True`` when the user has typed
-    directly in response to an active multi-choice prompt; in that case the
-    oldest unresolved clarify is returned so the text can resolve it instead
-    of being queued as an unrelated follow-up turn.
+    clarifies, text fallback, or a multi-choice clarify after the user picked
+    ``Other``). Gateways may pass ``include_choice_prompts=True`` when the user
+    has typed directly in response to an active multi-choice prompt; in that
+    case the oldest unresolved clarify is returned so the text can resolve it
+    instead of being queued as an unrelated follow-up turn.
+
+    Use ``get_any_pending_for_session`` when the caller only needs to know
+    whether any clarify prompt is blocking the session.
     """
     with _lock:
         ids = _session_index.get(session_key) or []
@@ -183,6 +186,23 @@ def get_pending_for_session(
             if entry is None:
                 continue
             if include_choice_prompts or entry.awaiting_text:
+                return entry
+        return None
+
+
+def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
+    """Return the OLDEST pending clarify entry for a session, or None.
+
+    Unlike ``get_pending_for_session()``, this includes multi-choice button
+    prompts that are still waiting for a button click. Gateway busy-session
+    guards use this to avoid queueing or interrupting while a clarify prompt
+    is already blocking the active agent thread.
+    """
+    with _lock:
+        ids = _session_index.get(session_key) or []
+        for cid in ids:
+            entry = _entries.get(cid)
+            if entry is not None:
                 return entry
         return None
 

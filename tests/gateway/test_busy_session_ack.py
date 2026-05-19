@@ -172,6 +172,71 @@ class TestBusySessionAck:
         agent.interrupt.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_pending_choice_clarify_text_number_resolves_without_busy_queue(self):
+        """Typed option numbers during a button clarify resolve the prompt,
+        not the busy-session queue/interrupt path."""
+        from gateway.run import GatewayRunner
+        from tools import clarify_gateway as cm
+
+        with cm._lock:
+            cm._entries.clear()
+            cm._session_index.clear()
+            cm._notify_cbs.clear()
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="2")
+        sk = build_session_key(event.source)
+        agent = MagicMock()
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+        cm.register("cid-choice", sk, "Pick", ["red", "green", "blue"])
+
+        result = await GatewayRunner._handle_message(runner, event)
+
+        assert result == ""
+        with cm._lock:
+            entry = cm._entries["cid-choice"]
+        assert entry.response == "green"
+        assert entry.event.is_set()
+        assert sk not in adapter._pending_messages
+        agent.interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pending_choice_clarify_unmatched_text_is_held_not_queued(self):
+        """Unmatched text while a button clarify is pending should remind the
+        user to answer the prompt and must not become a queued next turn."""
+        from gateway.run import GatewayRunner
+        from tools import clarify_gateway as cm
+
+        with cm._lock:
+            cm._entries.clear()
+            cm._session_index.clear()
+            cm._notify_cbs.clear()
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+        adapter = _make_adapter()
+        event = _make_event(text="ต่อ")
+        sk = build_session_key(event.source)
+        agent = MagicMock()
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+        cm.register("cid-choice-held", sk, "Pick", ["yes", "no"])
+
+        result = await GatewayRunner._handle_message(runner, event)
+
+        assert result is not None
+        assert "clarify question is still pending" in result
+        assert sk not in adapter._pending_messages
+        agent.interrupt.assert_not_called()
+        with cm._lock:
+            entry = cm._entries["cid-choice-held"]
+        assert entry.response is None
+        assert not entry.event.is_set()
+
+    @pytest.mark.asyncio
     async def test_sends_ack_when_agent_running(self):
         """First message during busy session should get a status ack."""
         runner, sentinel = _make_runner()

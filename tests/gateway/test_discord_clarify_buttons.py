@@ -25,6 +25,7 @@ if _repo not in sys.path:
 
 # Triggers the shared discord mock from tests/gateway/conftest.py before
 # importing the production module.
+import plugins.platforms.discord.adapter as discord_platform  # noqa: E402
 from plugins.platforms.discord.adapter import (  # noqa: E402
     ClarifyChoiceView,
     DiscordAdapter,
@@ -209,9 +210,9 @@ class TestClarifyChoiceResolve:
         interaction.response.edit_message.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_choice_falls_back_to_label_text_when_entry_missing(self):
-        """If the gateway entry vanished (race / stale view), the button's
-        own choice text is used as the response."""
+    async def test_choice_stale_entry_sends_ephemeral_reply(self):
+        """If the gateway entry vanished (race / timeout), do not mark the
+        Discord message as answered — tell the user the button is stale."""
         # Note: no cm.register() — entry intentionally absent
 
         view = ClarifyChoiceView(
@@ -220,11 +221,15 @@ class TestClarifyChoiceResolve:
             allowed_user_ids={"42"},  # matches _make_interaction's user; empty = fail-closed
         )
         interaction = _make_interaction()
-        # Doesn't raise; resolve_gateway_clarify returns False quietly
+
         await view._resolve_choice(interaction, index=0, choice="alpha")
-        # Still marks the view resolved + disables buttons
-        assert view.resolved is True
-        assert all(b.disabled for b in view.children)
+
+        assert view.resolved is False
+        assert all(not getattr(b, "disabled", False) for b in view.children)
+        interaction.response.send_message.assert_called_once()
+        kwargs = interaction.response.send_message.call_args.kwargs
+        assert kwargs.get("ephemeral") is True
+        interaction.response.edit_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_already_resolved_sends_ephemeral_reply(self):
@@ -366,6 +371,40 @@ class TestDiscordSendClarify:
         assert isinstance(kwargs["view"], ClarifyChoiceView)
         # 3 choice buttons + 1 Other
         assert len(kwargs["view"].children) == 4
+
+    @pytest.mark.asyncio
+    async def test_multi_choice_view_timeout_matches_configured_clarify_timeout(self, monkeypatch):
+        """Discord buttons must stay clickable for the same window the agent waits.
+
+        Regression: ClarifyChoiceView was hardcoded to 300s while the gateway
+        clarify primitive defaults to 600s and can be configured higher via
+        agent.clarify_timeout, leaving users unable to answer before the agent
+        timed out.
+        """
+        monkeypatch.setattr(
+            discord_platform,
+            "_get_discord_clarify_view_timeout",
+            lambda: 1800,
+        )
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 123456
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        result = await adapter.send_clarify(
+            chat_id="9001",
+            question="Pick a color",
+            choices=["red"],
+            clarify_id="cidTimeout",
+            session_key="sk-timeout",
+        )
+
+        assert result.success is True
+        view = channel.send.call_args.kwargs["view"]
+        assert isinstance(view, ClarifyChoiceView)
+        assert view.timeout == 1800
 
     @pytest.mark.asyncio
     async def test_open_ended_omits_view(self):
