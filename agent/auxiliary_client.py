@@ -3179,6 +3179,15 @@ def _try_payment_fallback(
                        "custom": "local/custom", "local/custom": "local/custom"}
     skip_chain_labels = {_alias_to_label.get(s, s) for s in skip_labels}
 
+    # Per-task fallback_chain should also apply when auxiliary.<task>.provider
+    # is "auto" and the Step-1 main provider failed.  This lets users keep
+    # "use my main model first" semantics while pinning the backup provider/
+    # model (e.g. compression → Codex first, OpenRouter Gemini 3.5 on failure).
+    fb_client, fb_model, fb_label = _try_configured_fallback_chain(
+        task, failed_provider, reason=reason)
+    if fb_client is not None:
+        return fb_client, fb_model, fb_label
+
     tried = []
     for label, try_fn in _get_provider_chain():
         if label in skip_chain_labels:
@@ -3552,9 +3561,9 @@ def _resolve_single_provider(
     # Reuse resolve_provider_client which handles provider→client mapping.
     client, resolved_model = resolve_provider_client(
         provider=provider,
-        model=model,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
+        model=model or "",
+        explicit_base_url=base_url or "",
+        explicit_api_key=api_key or "",
     )
     return client
 
