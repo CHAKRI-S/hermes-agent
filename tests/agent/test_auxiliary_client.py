@@ -1863,6 +1863,20 @@ class TestTryPaymentFallback:
         assert client is None
         assert label == ""
 
+    def test_auto_provider_uses_configured_task_fallback_chain_first(self):
+        """Auto mode should still honor auxiliary.<task>.fallback_chain after main failure."""
+        mock_client = MagicMock()
+        with patch("agent.auxiliary_client._get_auxiliary_task_config", return_value={
+                 "fallback_chain": [{"provider": "openrouter", "model": "google/gemini-3.5-flash"}],
+             }), \
+             patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, "google/gemini-3.5-flash")), \
+             patch("agent.auxiliary_client._try_openrouter") as openrouter_default:
+            client, model, label = _try_payment_fallback("openai-codex", task="compression")
+        assert client is mock_client
+        assert model == "google/gemini-3.5-flash"
+        assert label == "fallback_chain[0](openrouter)"
+        openrouter_default.assert_not_called()
+
     def test_codex_alias_maps_to_chain_label(self):
         """'codex' should map to 'openai-codex' in the skip set."""
         mock_client = MagicMock()
@@ -3840,30 +3854,39 @@ class TestCodexAuxiliaryAdapterTimeout:
         assert fake_client.responses.kwargs["stream"] is True
         assert response.choices[0].message.content == "summary"
 
-    def test_enforces_total_timeout_while_stream_keeps_emitting_events(self):
+    def test_enforces_total_timeout_while_stream_keeps_emitting_events(self, monkeypatch):
+        fake_now = 1000.0
+        close_calls = []
+
+        def fake_monotonic():
+            return fake_now
+
+        monkeypatch.setattr("agent.auxiliary_client.time.monotonic", fake_monotonic)
+
         class _SlowAliveCreateStream:
             def __iter__(self):
+                nonlocal fake_now
                 for _ in range(5):
-                    time.sleep(0.03)
+                    fake_now += 0.03
                     yield SimpleNamespace(type="response.in_progress")
 
-            def close(self): pass
+            def close(self):
+                close_calls.append(True)
 
         class FakeResponses:
             def create(self, **kwargs):
                 return _SlowAliveCreateStream()
 
-        fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
+        fake_client = SimpleNamespace(responses=FakeResponses())
         adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
 
-        started = time.monotonic()
         with pytest.raises(TimeoutError):
             adapter.create(
                 messages=[{"role": "user", "content": "summarize this"}],
                 timeout=0.05,
             )
 
-        assert time.monotonic() - started < 0.14
+        assert close_calls == [True]
 
 
 class TestCodexAuxiliaryToolMessageConversion:
