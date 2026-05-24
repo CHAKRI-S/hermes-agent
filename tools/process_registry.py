@@ -69,6 +69,13 @@ MAX_ACTIVE_PROCESS_AGE = 86400  # 24h default — see session_reset.bg_process_m
 WATCH_MIN_INTERVAL_SECONDS = 15   # Minimum spacing between consecutive watch matches
 WATCH_STRIKE_LIMIT = 3            # Strikes in a row → disable watch + promote to notify_on_complete
 
+# Watch notifications are mid-process hints ("server is ready", "migration done"),
+# not durable completion events.  If the agent is busy for a long time, these
+# events can otherwise sit in completion_queue and later wake an old gateway
+# session with stale project context.  Keep completion notifications durable, but
+# drop watch-pattern events that are no longer timely.
+WATCH_NOTIFICATION_MAX_AGE_SECONDS = 600
+
 # Global circuit breaker — across all sessions. Secondary safety net so concurrent
 # siblings can't collectively flood the user even when each is under its own cap.
 WATCH_GLOBAL_MAX_PER_WINDOW = 15
@@ -318,6 +325,7 @@ class ProcessRegistry:
                     "session_key": session.session_key,
                     "command": session.command,
                     "type": "watch_disabled",
+                    "created_at": now,
                     "suppressed": session._watch_suppressed,
                     "platform": session.watcher_platform,
                     "chat_id": session.watcher_chat_id,
@@ -349,6 +357,7 @@ class ProcessRegistry:
             "session_key": session.session_key,
             "command": session.command,
             "type": "watch_match",
+            "created_at": now,
             "pattern": matched_pattern,
             "output": output,
             "suppressed": suppressed,
@@ -1176,7 +1185,10 @@ class ProcessRegistry:
         Skips completion events the agent already consumed via wait/log or
         observed inline via poll() (see ``_drain_should_skip``). Gateway/TUI
         callers pass ``skip_poll_observed=False`` because read-only polling must
-        not suppress autonomous delivery there.
+        not suppress autonomous delivery there. Drops stale watch-pattern
+        events; they are readiness hints, not durable user prompts, and should
+        not wake an old Discord/session context long after the matching process
+        output occurred.
 
         When a routing filter is supplied, addressed notifications must not be
         drained into the wrong session. Async-delegation events always require
@@ -1201,6 +1213,7 @@ class ProcessRegistry:
         """
         results: "list[tuple[dict, str]]" = []
         requeue: "list[dict]" = []
+        now = time.time()
         while not self.completion_queue.empty():
             try:
                 evt = self.completion_queue.get_nowait()
@@ -1242,7 +1255,19 @@ class ProcessRegistry:
                 _evt_sid, skip_poll_observed=skip_poll_observed
             ):
                 continue
-
+            if evt.get("type") in {"watch_match", "watch_disabled"}:
+                try:
+                    created_at = float(evt.get("created_at", 0) or 0)
+                except (TypeError, ValueError):
+                    created_at = 0.0
+                if created_at and now - created_at > WATCH_NOTIFICATION_MAX_AGE_SECONDS:
+                    logger.info(
+                        "Dropping stale %s notification for process %s (age=%.1fs)",
+                        evt.get("type"),
+                        _evt_sid or "unknown",
+                        now - created_at,
+                    )
+                    continue
             text = format_process_notification(evt)
             if text:
                 results.append((evt, text))

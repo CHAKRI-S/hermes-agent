@@ -20,6 +20,9 @@ from tools.process_registry import (
     ProcessSession,
     WATCH_STRIKE_LIMIT,
     WATCH_GLOBAL_MAX_PER_WINDOW,
+    WATCH_GLOBAL_WINDOW_SECONDS,
+    WATCH_GLOBAL_COOLDOWN_SECONDS,
+    WATCH_NOTIFICATION_MAX_AGE_SECONDS,
 )
 
 
@@ -362,6 +365,56 @@ class TestSuppressAfterExit:
         assert not registry.completion_queue.empty()
         evt = registry.completion_queue.get_nowait()
         assert evt["type"] == "watch_match"
+
+
+# =========================================================================
+# Stale watch notification dropping
+# =========================================================================
+
+class TestStaleWatchNotificationDrop:
+    def test_drain_drops_stale_watch_match(self, registry):
+        """Old watch matches are readiness hints and should not wake sessions later."""
+        registry.completion_queue.put({
+            "type": "watch_match",
+            "session_id": "proc_old_ready",
+            "command": "npm run dev",
+            "pattern": "Ready",
+            "output": "✓ Ready in 741ms",
+            "created_at": time.time() - WATCH_NOTIFICATION_MAX_AGE_SECONDS - 1,
+        })
+
+        assert registry.drain_notifications() == []
+
+    def test_drain_keeps_fresh_watch_match(self, registry):
+        registry.completion_queue.put({
+            "type": "watch_match",
+            "session_id": "proc_fresh_ready",
+            "command": "npm run dev",
+            "pattern": "Ready",
+            "output": "✓ Ready in 741ms",
+            "created_at": time.time(),
+        })
+
+        drained = registry.drain_notifications()
+        assert len(drained) == 1
+        evt, text = drained[0]
+        assert evt["session_id"] == "proc_fresh_ready"
+        assert "matched watch pattern" in text
+
+    def test_drain_keeps_completion_even_when_old(self, registry):
+        """Completion events remain durable; only watch hints expire."""
+        registry.completion_queue.put({
+            "type": "completion",
+            "session_id": "proc_old_completion",
+            "command": "pytest",
+            "exit_code": 0,
+            "output": "done",
+            "created_at": time.time() - WATCH_NOTIFICATION_MAX_AGE_SECONDS - 1,
+        })
+
+        drained = registry.drain_notifications()
+        assert len(drained) == 1
+        assert "completed" in drained[0][1]
 
 
 # =========================================================================
