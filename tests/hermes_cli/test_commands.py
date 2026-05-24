@@ -361,13 +361,14 @@ class TestSlackNativeSlashes:
         assert any(d.startswith("Alias for /") for _n, d, _h in slashes)
 
     def test_telegram_parity(self):
-        """Every Telegram bot command must be registerable on Slack too.
+        """Telegram bot commands should be registerable on Slack when budget allows.
 
-        This catches the old behavior where Slack users couldn't invoke
-        commands like /btw natively. If a future command surfaces on
-        Telegram but not Slack (because of Slack's 50-slash cap), this
-        test fails loudly so we can curate the list rather than silently
-        dropping parity.
+        Slack allows at most 50 native slash commands per app. When the
+        command registry grows beyond that budget, the implementation must
+        curate the list deliberately instead of silently letting append order
+        decide. Keep high-frequency aliases such as /btw, /bg, and /q native;
+        lower-frequency informational commands remain reachable through
+        /hermes <command> when they are dropped by the cap.
 
         Slack-reserved built-in commands (e.g. /status) are excluded
         from parity checks since they cannot be registered on Slack.
@@ -386,6 +387,7 @@ class TestSlackNativeSlashes:
         # (Slack's 50-slash cap) are expected to be absent from native slashes.
         via_hermes_norm = {_norm(n) for n in _SLACK_VIA_HERMES_ONLY}
         missing = (tg_norm - slack_norm) - reserved_norm - via_hermes_norm
+
         assert not missing, (
             f"commands on Telegram but missing from Slack native slashes: {sorted(missing)}"
         )
