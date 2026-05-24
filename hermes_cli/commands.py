@@ -1351,10 +1351,8 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - init: repo-scan AGENTS.md bootstrap — a cwd-centric dev command that is
 #     rare from Slack; reachable as /hermes init. Without this entry, adding
 #     /init clamps /version off the native list and breaks Telegram parity.
-#   - version: low-frequency info command; reachable as /hermes version on
-#     Slack. Demoted when /context claimed a native slot (context is a
-#     recurring inspection surface; version is a one-off lookup); the demotion
-#     also absorbs the native slot /approvals now consumes at the 50-cap.
+#   - insights/platform/update/usage/version: lower-frequency info/admin
+#     surfaces; reached via /hermes <command> on Slack.
 #   - diff: git working-tree diff; reached via /hermes diff on Slack so it
 #     doesn't displace an existing native slash at the 50-command cap.
 #   - update: low-frequency self-update maintenance command; reached via
@@ -1378,7 +1376,13 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #     (session export is an interactive surface; platform is a rare
 #     informational lookup) — without this entry /save tips the registry
 #     past the 50-cap and silently clamps /platform, breaking parity.
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine", "pause", "whoami", "platform"})
+#   - insights/usage: lower-frequency info surfaces kept as /hermes
+#     <command> on Slack (Tik patch) — native slots would tip the 50-cap.
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    "topup", "moa", "debug", "egress", "init", "version", "diff",
+    "update", "insights", "platform", "usage", "heartbeat", "refine",
+    "pause", "whoami",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -1451,6 +1455,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
         cmd = _alias_to_cmd.get(alias)
         if cmd is not None:
             _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
+
 
     # First pass: canonical names (so they win slots if we hit the cap).
     for cmd in COMMAND_REGISTRY:
