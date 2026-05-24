@@ -251,7 +251,7 @@ async def test_process_message_unwraps_ephemeral_before_send():
         sleeps.append(duration)
 
     event = _make_event()
-    session_key = "agent:main:telegram:private:42"
+    session_key = adapter._source_session_key(event.source)
     with patch("gateway.platforms.base.asyncio.sleep", _fake_sleep), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):
@@ -288,7 +288,7 @@ async def test_process_message_ephemeral_reply_does_not_auto_upload_bare_paths(t
     adapter.set_message_handler(_handler)
 
     event = _make_event(text="/new")
-    session_key = "agent:main:telegram:private:42"
+    session_key = adapter._source_session_key(event.source)
     with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):
@@ -321,7 +321,7 @@ async def test_process_message_incapable_platform_does_not_schedule_delete():
     adapter.delete_message = _spy_delete  # type: ignore[assignment]
 
     event = _make_event()
-    session_key = "agent:main:telegram:private:42"
+    session_key = adapter._source_session_key(event.source)
     with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):
@@ -354,7 +354,7 @@ async def test_process_message_plain_string_behaves_unchanged():
     adapter.set_message_handler(_handler)
 
     event = _make_event()
-    session_key = "agent:main:telegram:private:42"
+    session_key = adapter._source_session_key(event.source)
     with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):
