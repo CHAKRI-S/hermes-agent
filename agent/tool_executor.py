@@ -309,7 +309,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     Results are collected in the original tool-call order and appended to
     messages so the API sees them in the expected sequence.
     """
-    tool_calls = assistant_message.tool_calls
+    tool_calls = assistant_message.tool_calls or []
     num_tools = len(tool_calls)
 
     # Resolve the context-scaled tool-output budget once per turn (cheap, but
