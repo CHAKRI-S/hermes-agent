@@ -356,7 +356,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     and /steer injection — used when this call is one segment of a larger
     mixed batch and the segmented dispatcher owns the turn-end work.
     """
-    tool_calls = assistant_message.tool_calls
+    tool_calls = assistant_message.tool_calls or []
     num_tools = len(tool_calls)
 
     # Resolve the context-scaled tool-output budget once per turn (cheap, but
