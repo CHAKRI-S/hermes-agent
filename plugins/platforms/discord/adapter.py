@@ -6568,7 +6568,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 callers decide where to stop.
                 """
                 nonlocal has_unverified
-                if msg.type not in {discord.MessageType.default, discord.MessageType.reply}:
+                msg_type = getattr(msg, "type", None)
+                msg_type_name = str(getattr(msg_type, "name", "")).lower()
+                discord_message_type = getattr(discord, "MessageType", None)
+                default_type = getattr(discord_message_type, "default", object())
+                reply_type = getattr(discord_message_type, "reply", object())
+                if (
+                    msg_type != default_type
+                    and msg_type != reply_type
+                    and msg_type_name not in {"default", "reply"}
+                ):
                     return None
                 content = getattr(msg, "clean_content", msg.content) or ""
                 if (
@@ -8082,6 +8091,11 @@ class DiscordAdapter(BasePlatformAdapter):
         if pending_text_injection:
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
 
+        # /read commands perform their own explicit history injection below;
+        # skip the generic reply/backfill scan so tests and runtime issue only
+        # the requested anchored history query.
+        read_history_requested = self._parse_read_history_command(normalized_content) is not None
+
         # ── History backfill ─────────────────────────────────────────
         # When require_mention is active, the bot only processes messages
         # that @mention it.  Messages in the channel between bot turns are
@@ -8107,7 +8121,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # to keep the partition rule clean.
         _channel_context = None
         _is_dm = isinstance(message.channel, discord.DMChannel)
-        if not _is_dm and self._discord_history_backfill():
+        if not _is_dm and self._discord_history_backfill() and not read_history_requested:
             # Run backfill when there's a real gap to fill:
             #   - mention-gated channels with no free-response override
             #     (messages between bot turns aren't in the transcript)
@@ -8152,7 +8166,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 if _backfill_text:
                     _channel_context = _backfill_text
 
-        read_history_requested = self._parse_read_history_command(normalized_content) is not None
         if read_history_requested and not pending_text_injection:
             # Text-message form (not native Discord slash interaction): rewrite
             # /readXX into an ordinary agent prompt with current channel/thread
