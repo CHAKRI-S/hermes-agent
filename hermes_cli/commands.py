@@ -1351,8 +1351,8 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - init: repo-scan AGENTS.md bootstrap — a cwd-centric dev command that is
 #     rare from Slack; reachable as /hermes init. Without this entry, adding
 #     /init clamps /version off the native list and breaks Telegram parity.
-#   - insights/platform/update/usage/version: lower-frequency info/admin
-#     surfaces; reached via /hermes <command> on Slack.
+#   - insights/platform/restart/update/usage/version: lower-frequency
+#     info/admin surfaces; reached via /hermes <command> on Slack.
 #   - diff: git working-tree diff; reached via /hermes diff on Slack so it
 #     doesn't displace an existing native slash at the 50-command cap.
 #   - update: low-frequency self-update maintenance command; reached via
@@ -1380,8 +1380,8 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #     <command> on Slack (Tik patch) — native slots would tip the 50-cap.
 _SLACK_VIA_HERMES_ONLY = frozenset({
     "topup", "moa", "debug", "egress", "init", "version", "diff",
-    "update", "insights", "platform", "usage", "heartbeat", "refine",
-    "pause", "whoami",
+    "restart", "update", "insights", "platform", "usage", "heartbeat",
+    "refine", "pause", "whoami",
 })
 
 
