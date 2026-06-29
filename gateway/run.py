@@ -8588,9 +8588,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Intercept messages that are responses to a pending clarify request.
         # Open-ended prompts and "Other" responses are captured as free text;
         # direct replies to multi-choice prompts are accepted too ("2" maps
-        # to the second option, exact choice text maps to that choice, and
-        # arbitrary text becomes a custom answer). Slash commands still bypass
-        # this path so /stop and friends keep working.
+        # to the second option and exact choice text maps to that choice.
+        # Unmatched text leaves the prompt pending instead of entering the
+        # busy queue. Slash commands still bypass this path so /stop and
+        # friends keep working.
         _clarify_mod = None
         try:
             from tools import clarify_gateway as _clarify_mod

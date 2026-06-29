@@ -207,20 +207,28 @@ def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
         return None
 
 
-def _coerce_text_response(entry: _ClarifyEntry, response: str) -> str:
-    """Map typed choice replies to canonical choice text, otherwise keep custom text."""
+def _coerce_text_response(entry: _ClarifyEntry, response: str) -> Optional[str]:
+    """Map typed choice replies to canonical choice text when valid.
+
+    Open-ended clarifies and entries explicitly awaiting text (the user chose
+    ``Other``) accept arbitrary text. Multi-choice button prompts only accept a
+    typed option number or exact option text; unrelated text leaves the prompt
+    pending instead of becoming an accidental follow-up turn or unintended
+    custom answer.
+    """
     text = str(response).strip()
-    if entry.choices:
-        try:
-            idx = int(text) - 1
-        except ValueError:
-            idx = -1
-        if 0 <= idx < len(entry.choices):
-            return entry.choices[idx]
-        for choice in entry.choices:
-            if text.casefold() == str(choice).strip().casefold():
-                return str(choice).strip()
-    return text
+    if not entry.choices or entry.awaiting_text:
+        return text
+    try:
+        idx = int(text) - 1
+    except ValueError:
+        idx = -1
+    if 0 <= idx < len(entry.choices):
+        return entry.choices[idx]
+    for choice in entry.choices:
+        if text.casefold() == str(choice).strip().casefold():
+            return str(choice).strip()
+    return None
 
 
 def resolve_text_response_for_session(session_key: str, response: str) -> bool:
@@ -228,10 +236,10 @@ def resolve_text_response_for_session(session_key: str, response: str) -> bool:
     entry = get_pending_for_session(session_key, include_choice_prompts=True)
     if entry is None:
         return False
-    return resolve_gateway_clarify(
-        entry.clarify_id,
-        _coerce_text_response(entry, response),
-    )
+    coerced = _coerce_text_response(entry, response)
+    if coerced is None:
+        return False
+    return resolve_gateway_clarify(entry.clarify_id, coerced)
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:
