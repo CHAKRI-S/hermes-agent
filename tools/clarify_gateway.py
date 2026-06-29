@@ -218,46 +218,26 @@ def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
 
 
 def _coerce_text_response(entry: _ClarifyEntry, response: str) -> Optional[str]:
-    """Map typed choice replies to canonical choice text, otherwise keep or reject custom text.
+    """Map typed choice replies to canonical choice text when valid.
 
-    For native interactive multi-choice clarifies (button UI, awaiting_text=False):
-      - Accept numeric selections ("2" → choice[1])
-      - Accept exact choice label matches (case-insensitive)
-      - Reject arbitrary prose (return None) so the message continues as a normal turn
-
-    For text fallback or awaiting_text mode:
-      - Accept any text (numeric/label/custom) after passing through coercion
-
-    For open-ended clarifies (no choices):
-      - Accept any text
-
-    Returns None when the response should be rejected (arbitrary prose for native multi-choice).
+    Open-ended clarifies and entries explicitly awaiting text (the user chose
+    ``Other``) accept arbitrary text. Multi-choice button prompts only accept a
+    typed option number or exact option text; unrelated text leaves the prompt
+    pending instead of becoming an accidental follow-up turn or unintended
+    custom answer.
     """
     text = str(response).strip()
-
-    if not entry.choices:
-        # Open-ended: accept any text
+    if not entry.choices or entry.awaiting_text:
         return text
-
-    # Try numeric selection first (always valid for multi-choice)
     try:
         idx = int(text) - 1
     except ValueError:
         idx = -1
-
     if 0 <= idx < len(entry.choices):
         return entry.choices[idx]
-
-    # Try exact choice label match (always valid for multi-choice)
     for choice in entry.choices:
         if text.casefold() == str(choice).strip().casefold():
             return str(choice).strip()
-
-    # For text fallback or awaiting_text mode, accept custom text
-    # For native interactive multi-choice mode, reject arbitrary prose
-    if entry.awaiting_text:
-        return text
-
     return None
 
 
@@ -270,16 +250,10 @@ def resolve_text_response_for_session(session_key: str, response: str) -> bool:
     entry = get_pending_for_session(session_key, include_choice_prompts=True)
     if entry is None:
         return False
-
     coerced = _coerce_text_response(entry, response)
     if coerced is None:
-        # Response rejected: message should continue as a normal turn
         return False
-
-    return resolve_gateway_clarify(
-        entry.clarify_id,
-        coerced,
-    )
+    return resolve_gateway_clarify(entry.clarify_id, coerced)
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:
