@@ -180,14 +180,11 @@ def get_pending_for_session(
     """Return the oldest pending clarify entry for a session, or None.
 
     By default this only returns entries awaiting free-form text (open-ended
-    clarifies, text fallback, or a multi-choice clarify after the user picked
-    ``Other``). Gateways may pass ``include_choice_prompts=True`` when the user
-    has typed directly in response to an active multi-choice prompt; in that
-    case the oldest unresolved clarify is returned so the text can resolve it
-    instead of being queued as an unrelated follow-up turn.
-
-    Use ``get_any_pending_for_session`` when the caller only needs to know
-    whether any clarify prompt is blocking the session.
+    clarifies, or a multi-choice clarify after the user picked ``Other``).
+    Gateways may pass ``include_choice_prompts=True`` when the user has typed
+    directly in response to an active multi-choice prompt; in that case the
+    oldest unresolved clarify is returned so the text can resolve it instead
+    of being queued as an unrelated follow-up turn.
     """
     with _lock:
         ids = _session_index.get(session_key) or []
@@ -200,46 +197,47 @@ def get_pending_for_session(
         return None
 
 
-def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
-    """Return the OLDEST pending clarify entry for a session, or None.
-
-    Unlike ``get_pending_for_session()``, this includes multi-choice button
-    prompts that are still waiting for a button click. Gateway busy-session
-    guards use this to avoid queueing or interrupting while a clarify prompt
-    is already blocking the active agent thread.
-    """
-    with _lock:
-        ids = _session_index.get(session_key) or []
-        for cid in ids:
-            entry = _entries.get(cid)
-            if entry is not None:
-                return entry
-        return None
-
-
 def _coerce_text_response(entry: _ClarifyEntry, response: str) -> Optional[str]:
-    """Map typed choice replies to canonical choice text when valid.
+    """Map typed choice replies to canonical choice text, otherwise keep or reject custom text.
 
-    Open-ended clarifies and entries explicitly awaiting text (the user chose
-    ``Other``) accept arbitrary text. Multi-choice button prompts only accept a
-    typed option number or exact option text; unrelated text leaves the prompt
-    pending instead of becoming an accidental follow-up turn or unintended
-    custom answer.
+    For native interactive multi-choice clarifies (button UI, awaiting_text=False):
+      - Accept numeric selections ("2" → choice[1])
+      - Accept exact choice label matches (case-insensitive)
+      - Reject arbitrary prose (return None) so the message continues as a normal turn
+
+    For text fallback or awaiting_text mode:
+      - Accept any text (numeric/label/custom) after passing through coercion
+
+    For open-ended clarifies (no choices):
+      - Accept any text
+
+    Returns None when the response should be rejected (arbitrary prose for native multi-choice).
     """
     text = str(response).strip()
+
     if not entry.choices:
+        # Open-ended: accept any text
         return text
+
+    # Try numeric selection first (always valid for multi-choice)
     try:
         idx = int(text) - 1
     except ValueError:
         idx = -1
+
     if 0 <= idx < len(entry.choices):
         return entry.choices[idx]
+
+    # Try exact choice label match (always valid for multi-choice)
     for choice in entry.choices:
         if text.casefold() == str(choice).strip().casefold():
             return str(choice).strip()
+
+    # For text fallback or awaiting_text mode, accept custom text
+    # For native interactive multi-choice mode, reject arbitrary prose
     if entry.awaiting_text:
         return text
+
     return None
 
 
@@ -252,10 +250,16 @@ def resolve_text_response_for_session(session_key: str, response: str) -> bool:
     entry = get_pending_for_session(session_key, include_choice_prompts=True)
     if entry is None:
         return False
+
     coerced = _coerce_text_response(entry, response)
     if coerced is None:
+        # Response rejected: message should continue as a normal turn
         return False
-    return resolve_gateway_clarify(entry.clarify_id, coerced)
+
+    return resolve_gateway_clarify(
+        entry.clarify_id,
+        coerced,
+    )
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:
