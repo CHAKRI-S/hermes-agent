@@ -222,7 +222,9 @@ def spawn_async_diagnostic(
 
     # Inline shell so we don't have to ship a helper script.  bash -c is
     # available on every POSIX target we support; on Windows we just skip
-    # the snapshot (the platform doesn't ship ps anyway).
+    # the snapshot (the platform doesn't ship ps anyway).  The timeout is
+    # enforced by a tiny Python wrapper rather than the GNU ``timeout``
+    # executable, which is not available on macOS by default.
     if sys.platform == "win32":
         return None
 
@@ -254,8 +256,22 @@ def spawn_async_diagnostic(
         # would also reap us anyway, but defense in depth).  Without
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
+        timeout_runner = (
+            "import subprocess,sys; "
+            "timeout=float(sys.argv[1]); command=sys.argv[2:]; "
+            "\ntry: subprocess.run(command, timeout=timeout, stdin=subprocess.DEVNULL, check=False)"
+            "\nexcept subprocess.TimeoutExpired: pass"
+        )
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            [
+                sys.executable,
+                "-c",
+                timeout_runner,
+                str(timeout_seconds),
+                "bash",
+                "-c",
+                script,
+            ],
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
