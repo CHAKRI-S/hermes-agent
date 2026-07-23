@@ -172,9 +172,10 @@ def test_anthropic_non_streaming_stale_aborts_request_client_not_shared():
 
     def _create(_api_kwargs, *, client):
         assert client is request_client
-        # Outlive the 0.05s stale timeout AND the worker join (2.0s) so the
-        # stale detector surfaces its TimeoutError.
-        time.sleep(2.5)
+        # Outlive the 0.05s stale timeout AND the worker join (2.0s) with
+        # enough margin for loaded CI and macOS thread scheduling, so the
+        # stale detector reliably surfaces its TimeoutError.
+        time.sleep(5.0)
         return object()
 
     agent._anthropic_messages_create = MagicMock(side_effect=_create)

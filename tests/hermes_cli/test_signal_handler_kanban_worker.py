@@ -103,6 +103,15 @@ def _is_alive_like_dispatcher(pid: int) -> bool:
                         break
         except (FileNotFoundError, PermissionError, OSError):
             pass
+    else:
+        # macOS has no /proc state file.  Reap an exited child without
+        # blocking so a zombie created by os._exit is counted as dead.
+        try:
+            waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+            if waited_pid == pid:
+                return False
+        except (ChildProcessError, OSError):
+            pass
     return True
 
 
