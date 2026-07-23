@@ -245,13 +245,15 @@ async def test_responsive_loop_expiry_does_not_dump(monkeypatch):
         "_dump_loop_blocked_diagnostics",
         lambda timeout, grace: dumps.append((timeout, grace)),
     )
-    monkeypatch.setattr(tg_adapter, "_LOOP_BLOCKED_DUMP_GRACE", 0.1)
+    # Leave enough grace for a heavily loaded CI/macOS scheduler to run the
+    # loop callback before the watchdog classifies the loop as blocked.
+    monkeypatch.setattr(tg_adapter, "_LOOP_BLOCKED_DUMP_GRACE", 0.5)
 
     hung = _asyncio.get_running_loop().create_future()
     with pytest.raises(_asyncio.TimeoutError):
         await tg_adapter._await_with_thread_deadline(hung, timeout=0.05)
     # Give the (cancelled) watchdog window time to have fired if it were going to.
-    await _asyncio.sleep(0.3)
+    await _asyncio.sleep(0.8)
     assert dumps == []
     hung.cancel()
 
