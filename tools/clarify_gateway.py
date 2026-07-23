@@ -227,7 +227,7 @@ def _coerce_text_response(entry: _ClarifyEntry, response: str) -> Optional[str]:
     custom answer.
     """
     text = str(response).strip()
-    if not entry.choices or entry.awaiting_text:
+    if not entry.choices:
         return text
     try:
         idx = int(text) - 1
@@ -238,6 +238,8 @@ def _coerce_text_response(entry: _ClarifyEntry, response: str) -> Optional[str]:
     for choice in entry.choices:
         if text.casefold() == str(choice).strip().casefold():
             return str(choice).strip()
+    if entry.awaiting_text:
+        return text
     return None
 
 
