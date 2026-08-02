@@ -1334,6 +1334,12 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 # native slot, the alias spelling stays reachable via /hermes reset).
 _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 
+# Canonical commands that must remain native even when registry growth reaches
+# Slack's 50-command cap. /help is part of the public Slack contract and is
+# asserted by the adapter registration tests, so it cannot degrade to
+# ``/hermes help`` merely because a later command was added.
+_SLACK_PRIORITY_COMMANDS = ("help",)
+
 # Canonical commands intentionally NOT given a native Slack slash slot. Slack
 # caps apps at 50 slash commands and the registry is at that ceiling; rather
 # than let the clamp silently drop whichever command sorts last (and break
@@ -1351,10 +1357,10 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - init: repo-scan AGENTS.md bootstrap — a cwd-centric dev command that is
 #     rare from Slack; reachable as /hermes init. Without this entry, adding
 #     /init clamps /version off the native list and breaks Telegram parity.
-#   - commands/help/insights/platform/restart/update/usage/version:
+#   - commands/insights/platform/reload_skills/restart/update/usage/version:
 #     lower-frequency info/admin surfaces; reached via /hermes <command> on
-#     Slack. Listing commands/help here also makes their absence from the
-#     50-slot native registry deliberate instead of dependent on clamp order.
+#     Slack. Listing these here also makes their absence from the 50-slot
+#     native registry deliberate instead of dependent on clamp order.
 #   - diff: git working-tree diff; reached via /hermes diff on Slack so it
 #     doesn't displace an existing native slash at the 50-command cap.
 #   - update: low-frequency self-update maintenance command; reached via
@@ -1383,8 +1389,14 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 _SLACK_VIA_HERMES_ONLY = frozenset({
     "topup", "moa", "debug", "egress", "init", "version", "diff",
     "restart", "update", "insights", "platform", "usage", "heartbeat",
-    "refine", "pause", "whoami", "commands", "help",
+    "refine", "pause", "whoami", "commands", "reload-skills", "reload_skills",
 })
+
+# Gateway-only does not mean every messaging platform implements the command.
+# These history commands are backed exclusively by Discord channel/thread APIs,
+# so exposing them in Slack's native manifest or /hermes subcommand map would
+# advertise commands that Slack cannot execute.
+_SLACK_EXCLUDED_COMMANDS = frozenset({"read", "threadread"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -1434,6 +1446,8 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             return
         if slack_name in _SLACK_RESERVED_COMMANDS:
             return
+        if slack_name in _SLACK_EXCLUDED_COMMANDS:
+            return
         if slack_name in _SLACK_VIA_HERMES_ONLY:
             # Intentionally Slack-via-/hermes only (see _SLACK_VIA_HERMES_ONLY).
             return
@@ -1443,10 +1457,19 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
         entries.append((slack_name, desc[:140], hint[:100]))
         seen.add(slack_name)
 
-    # Priority pass: pin high-value aliases (e.g. /btw, /bg, /reset) ahead of
-    # everything except /hermes, so a new canonical command can never silently
-    # clamp them off the 50-slash cap. Each alias borrows its parent command's
-    # description and hint.
+    # Priority pass: pin required canonical commands and high-value aliases
+    # ahead of the general registry walk so growth cannot silently clamp them.
+    _command_by_name = {
+        cmd.name: cmd
+        for cmd in COMMAND_REGISTRY
+        if _is_gateway_available(cmd, overrides)
+    }
+    for command_name in _SLACK_PRIORITY_COMMANDS:
+        cmd = _command_by_name.get(command_name)
+        if cmd is not None:
+            _add(cmd.name, cmd.description, cmd.args_hint or "")
+
+    # Each alias borrows its parent command's description and hint.
     _alias_to_cmd = {
         alias: cmd
         for cmd in COMMAND_REGISTRY
@@ -1521,6 +1544,8 @@ def slack_subcommand_map() -> dict[str, str]:
     mapping: dict[str, str] = {}
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
+            continue
+        if _sanitize_slack_name(cmd.name) in _SLACK_EXCLUDED_COMMANDS:
             continue
         mapping[cmd.name] = f"/{cmd.name}"
         for alias in cmd.aliases:

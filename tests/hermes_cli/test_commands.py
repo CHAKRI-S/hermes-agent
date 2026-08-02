@@ -13,6 +13,7 @@ from hermes_cli.commands import (
     SlashCommandAutoSuggest,
     SlashCommandCompleter,
     _CMD_NAME_LIMIT,
+    _SLACK_EXCLUDED_COMMANDS,
     _SLACK_RESERVED_COMMANDS,
     _SLACK_VIA_HERMES_ONLY,
     _TG_NAME_LIMIT,
@@ -201,6 +202,11 @@ class TestSlackSubcommandMap:
             if cmd.cli_only and not cmd.gateway_config_gate:
                 assert cmd.name not in mapping
 
+    def test_excludes_discord_only_history_commands(self):
+        mapping = slack_subcommand_map()
+        assert "read" not in mapping
+        assert "threadread" not in mapping
+
 
 class TestSlackNativeSlashes:
     """Slack native slash command generation — used to register every
@@ -216,6 +222,20 @@ class TestSlackNativeSlashes:
             assert name == name.lower()
             for ch in name:
                 assert ch.isalnum() or ch in "-_", f"invalid char {ch!r} in {name!r}"
+
+    def test_excludes_discord_only_history_commands(self):
+        names = {name for name, _desc, _hint in slack_native_slashes()}
+        assert "read" not in names
+        assert "threadread" not in names
+
+    def test_reload_skills_is_explicitly_routed_via_hermes(self):
+        names = {name for name, _desc, _hint in slack_native_slashes()}
+        assert "reload-skills" in _SLACK_VIA_HERMES_ONLY
+        assert "reload_skills" in _SLACK_VIA_HERMES_ONLY
+        assert "reload-skills" not in names
+        assert "reload_skills" not in names
+        assert slack_subcommand_map()["reload-skills"] == "/reload-skills"
+        assert slack_subcommand_map()["reload_skills"] == "/reload_skills"
 
 
 
@@ -244,10 +264,16 @@ class TestSlackNativeSlashes:
         slack_norm = {_norm(n) for n in slack_names}
         tg_norm = {_norm(n) for n in tg_names}
         reserved_norm = {_norm(n) for n in _SLACK_RESERVED_COMMANDS}
+        excluded_norm = {_norm(n) for n in _SLACK_EXCLUDED_COMMANDS}
         # Commands deliberately routed through /hermes <command> on Slack only
         # (Slack's 50-slash cap) are expected to be absent from native slashes.
         via_hermes_norm = {_norm(n) for n in _SLACK_VIA_HERMES_ONLY}
-        missing = (tg_norm - slack_norm) - reserved_norm - via_hermes_norm
+        missing = (
+            (tg_norm - slack_norm)
+            - reserved_norm
+            - excluded_norm
+            - via_hermes_norm
+        )
 
         assert not missing, (
             f"commands on Telegram but missing from Slack native slashes: {sorted(missing)}"

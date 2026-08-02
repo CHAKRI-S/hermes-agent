@@ -6051,7 +6051,7 @@ class DiscordAdapter(BasePlatformAdapter):
         ])
         async def slash_read(
             interaction: discord.Interaction,
-            prompt: str = "",
+            prompt: str,
             limit: int = 200,
         ):
             await self._run_read_history_slash(interaction, "read", prompt, limit=limit)
@@ -6075,7 +6075,7 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_threadread(
             interaction: discord.Interaction,
             name: str,
-            prompt: str = "",
+            prompt: str,
             limit: int = 200,
             auto_archive_duration: int = 1440,
         ):

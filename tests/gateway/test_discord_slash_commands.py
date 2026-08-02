@@ -1,5 +1,6 @@
 """Tests for native Discord slash command fast-paths (thread creation & auto-thread)."""
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import sys
@@ -147,6 +148,7 @@ async def test_registers_native_read_slash_command(adapter):
     adapter._register_slash_commands()
 
     command = adapter._client.tree.commands["read"]
+    assert inspect.signature(command).parameters["prompt"].default is inspect.Parameter.empty
     interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()))
 
     await command(interaction, prompt="สรุปจากตรงนี้", limit=500)
@@ -166,6 +168,7 @@ async def test_registers_native_threadread_slash_command(adapter):
     adapter._register_slash_commands()
 
     command = adapter._client.tree.commands["threadread"]
+    assert inspect.signature(command).parameters["prompt"].default is inspect.Parameter.empty
     interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()))
 
     await command(
