@@ -146,6 +146,9 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
     and message "The service may be temporarily overloaded...". Treat only
     that narrow shape specially so ordinary quota/billing 429s still fail fast
     through the existing classifier.
+
+    Matches the GLM-5 family by prefix (glm-5.2, glm-5.3, ...) so a new
+    coding-plan model release does not silently drop the overload policy.
     """
     base = (base_url or "").lower()
     model_name = (model or "").lower()
@@ -154,7 +157,7 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
     return (
         status == 429
         and "api.z.ai/api/coding/paas/v4" in base
-        and "glm-5.2" in model_name
+        and ("glm-5." in model_name or "glm-5-" in model_name)
         and ("1305" in text or "temporarily overloaded" in text)
     )
 
