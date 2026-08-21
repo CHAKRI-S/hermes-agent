@@ -5833,6 +5833,7 @@ class BasePlatformAdapter(ABC):
             source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            profile=self._session_key_profile(source),
         )
 
     def _event_source_matches_session_key(self, event: MessageEvent, session_key: str) -> bool:

@@ -20,8 +20,8 @@ adapter keys into its own namespace even before the runner stamps the source.
 
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import BasePlatformAdapter
+from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent
 from gateway.session import SessionSource, build_session_key
 
 
@@ -82,6 +82,26 @@ class TestOwnerProfileKeying:
         a.set_owner_profile("medicina")
         key = build_session_key(_source(), profile=a._session_key_profile(_source()))
         assert key.startswith("agent:medicina:"), key
+
+    def test_background_routing_guard_uses_owner_profile_namespace(self):
+        """The background ownership guard must derive the exact same key as
+        ``handle_message`` before the runner stamps ``source.profile``.
+
+        Otherwise every named-profile adapter accepts the event at ingress but
+        drops it inside ``_process_message_background`` as a cross-session
+        response before typing, agent, or delivery side effects run.
+        """
+        a = _Adapter()
+        a.config = PlatformConfig(extra={})
+        a.set_session_store(_Store(active="default"))
+        a.set_owner_profile("medicina")
+        source = _source()
+        expected = build_session_key(source, profile="medicina")
+
+        assert a._source_session_key(source) == expected
+        assert a._event_source_matches_session_key(
+            MessageEvent(text="hello", source=source), expected
+        )
 
     def test_two_bots_same_chat_do_not_collide(self):
         """Two adapters, one chat id: the keys must differ or the batching dict,
