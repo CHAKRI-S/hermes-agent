@@ -118,6 +118,7 @@ def test_apiserver_session_with_id_dispatches_background(monkeypatch):
         chat_id="raw-sid-7",
         session_key="raw-sid-7",
         session_id="raw-sid-7",
+        profile="worker",
         async_delivery=False,
     )
 
@@ -138,6 +139,7 @@ def test_apiserver_session_with_id_dispatches_background(monkeypatch):
     # id, not the subagent-internal id the child build clobbered
     # HERMES_SESSION_ID with (see clobbering_build_child).
     assert evt["origin_session_id"] == "raw-sid-7"
+    assert evt["origin_profile"] == "worker"
 
 
 # ---------------------------------------------------------------------------

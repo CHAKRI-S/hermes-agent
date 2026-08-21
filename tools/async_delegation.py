@@ -209,12 +209,10 @@ def _capture_routing_origin() -> Dict[str, Any]:
     carry the contextvars) and persisted with the durable record, so a
     completion replayed after a restart can reconstruct a full SessionSource
     even when the session-store origin and in-memory source cache are gone.
-    scope_id matters most: on a relay-fronted deployment the connector's
-    fail-closed egress guard needs the tenant discriminator (or a user
-    binding) to route a scoped reply; without it, post-restart scoped
-    completions bounce with "target not routed to an onboarded tenant"
-    (staging 2026-08-09 defect #4). Best-effort — empty values are simply
-    omitted so CLI/contextvar-unaware paths persist nothing new.
+    ``origin_profile`` is authoritative for raw API-server session ids, which
+    carry no structured ``agent:<profile>:...`` namespace. ``scope_id`` is
+    likewise required by relay-fronted deployments. Best-effort — empty values
+    are omitted so CLI/contextvar-unaware paths persist nothing new.
     """
     origin: Dict[str, Any] = {}
     try:
@@ -224,6 +222,7 @@ def _capture_routing_origin() -> Dict[str, Any]:
             ("scope_id", "HERMES_SESSION_SCOPE_ID"),
             ("user_id", "HERMES_SESSION_USER_ID"),
             ("user_name", "HERMES_SESSION_USER_NAME"),
+            ("origin_profile", "HERMES_SESSION_PROFILE"),
         ):
             value = get_session_env(env_name, "")
             if value:
@@ -244,10 +243,10 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         key: record.get(key)
         for key in (
             "goal", "goals", "context", "toolsets", "role", "model", "is_batch",
-            # Routing origin (scope_id/user_id/user_name): persisted so a
+            # Routing origin (scope/user/profile): persisted so a
             # restart-recovered completion can reconstruct a full
             # SessionSource — see _capture_routing_origin.
-            "scope_id", "user_id", "user_name",
+            "scope_id", "user_id", "user_name", "origin_profile",
         )
         if key in record
     }
@@ -373,9 +372,8 @@ def recover_abandoned_delegations() -> int:
                 "dispatched_at": dispatched_at, "completed_at": now,
             }
             # Routing origin persisted at dispatch (see _capture_routing_origin):
-            # restores scope_id/user_id for the reconstructed SessionSource so
-            # relay egress priming works after a restart.
-            for _k in ("scope_id", "user_id", "user_name"):
+            # restores scope/user/profile ownership after a restart.
+            for _k in ("scope_id", "user_id", "user_name", "origin_profile"):
                 if task.get(_k):
                     event[_k] = task[_k]
             result = {"status": "unknown", "summary": None, "error": event["error"]}
@@ -987,8 +985,9 @@ def _push_completion_event(
     }
     # Routing origin captured at dispatch (see _capture_routing_origin):
     # additive, lets the gateway reconstruct a full SessionSource (incl.
-    # scope_id for relay tenant egress) when its own caches are cold.
-    for _k in ("scope_id", "user_id", "user_name"):
+    # profile ownership for raw API ids and scope_id for relay tenant egress)
+    # when its own caches are cold.
+    for _k in ("scope_id", "user_id", "user_name", "origin_profile"):
         if record.get(_k):
             evt[_k] = record[_k]
     # Structured stall metadata (#51690) — additive, present only on
@@ -1202,7 +1201,7 @@ def _push_batch_completion_event(
         "completed_at": completed_at,
     }
     # Routing origin captured at dispatch (see _capture_routing_origin).
-    for _k in ("scope_id", "user_id", "user_name"):
+    for _k in ("scope_id", "user_id", "user_name", "origin_profile"):
         if event_record.get(_k):
             evt[_k] = event_record[_k]
     # Structured stall metadata (#51690) — additive, present only on

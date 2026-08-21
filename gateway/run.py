@@ -3858,9 +3858,11 @@ def _parse_session_key(session_key: str) -> "dict | None":
     """Parse a session key into its component parts.
 
     Session keys follow the format
-    ``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
+    ``agent:{profile-namespace}:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
+    The historical/default namespace is ``main``; named multiplex profiles use
+    their normalized profile name in that slot.
     Returns a dict with ``platform``, ``chat_type``, ``chat_id``, and
-    optionally ``thread_id`` keys, or None if the key doesn't match.
+    optionally ``profile``/``thread_id`` keys, or None if the key doesn't match.
 
     The 6th element is only returned as ``thread_id`` for chat types where
     it is unambiguous (``dm`` and ``thread``).  For group/channel sessions
@@ -3868,12 +3870,18 @@ def _parse_session_key(session_key: str) -> "dict | None":
     thread_id, so we leave ``thread_id`` out to avoid mis-routing.
     """
     parts = session_key.split(":")
-    if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
+    namespace = parts[1] if len(parts) > 1 else ""
+    valid_namespace = namespace == "main" or bool(
+        re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,250}", namespace)
+    )
+    if len(parts) >= 5 and parts[0] == "agent" and valid_namespace:
         result = {
             "platform": parts[2],
             "chat_type": parts[3],
             "chat_id": parts[4],
         }
+        if namespace != "main":
+            result["profile"] = namespace
         if len(parts) > 5 and parts[3] in {"dm", "thread"}:
             result["thread_id"] = parts[5]
         return result
@@ -21679,6 +21687,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if msg and source is not None:
             await self._defer_goal_status_notice_after_delivery(source, msg)
 
+    async def _resolve_loop_route_profile(
+        self,
+        session_id: str,
+        route: Dict[str, str],
+    ) -> Tuple[Optional[str], bool]:
+        """Return a proven profile owner for a persisted gateway loop route.
+
+        Routes created before profile-aware persistence have no ``profile``
+        field. In multiplex mode, treating that absence as the default profile
+        can send a named profile's wakeup through the wrong bot. Recover the
+        owner from the authoritative session row; if it is unavailable, fail
+        closed. Non-multiplex gateways retain the historical default behavior.
+        """
+        route_profile = str(route.get("profile") or "").strip()
+        if route_profile:
+            return route_profile, True
+        if not bool(getattr(self.config, "multiplex_profiles", False)):
+            return None, True
+
+        session_db = getattr(self, "_session_db", None)
+        if session_db is not None:
+            try:
+                session_row = await session_db.get_session(session_id)
+            except Exception as exc:
+                logger.debug(
+                    "loop wakeup: failed to recover profile for session %s: %s",
+                    session_id, exc,
+                )
+            else:
+                if isinstance(session_row, dict):
+                    stored_profile = str(
+                        session_row.get("profile_name") or ""
+                    ).strip()
+                    if stored_profile:
+                        return stored_profile, True
+
+        return None, False
+
     async def _loop_wakeup_watcher(self, interval: float = 15.0) -> None:
         """Fire due /loop wakeups for idle gateway sessions.
 
@@ -21719,20 +21765,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if not platform_name or not chat_id:
                         # CLI / TUI-owned loop — their own schedulers drive it.
                         continue
-                    adapter = None
-                    for p, a in self.adapters.items():
-                        if p.value == platform_name:
-                            adapter = a
-                            break
-                    if adapter is None:
+                    route_profile, profile_proven = (
+                        await self._resolve_loop_route_profile(sid, route)
+                    )
+                    if not profile_proven:
                         if sid not in warned_no_route:
                             warned_no_route.add(sid)
-                            logger.debug(
-                                "loop wakeup: no adapter for platform %r (session %s)",
-                                platform_name, sid,
+                            logger.warning(
+                                "loop wakeup: refusing ambiguous legacy route without "
+                                "a profile owner (session %s)", sid,
                             )
                         continue
-
                     # Build the source + session key to check business.
                     evt_stub = {
                         "session_key": "",
@@ -21742,9 +21785,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "thread_id": route.get("thread_id", ""),
                         "user_id": route.get("user_id", ""),
                         "user_name": route.get("user_name", ""),
+                        "profile": route_profile or "",
                     }
                     source = self._build_process_event_source(evt_stub)
                     if source is None:
+                        continue
+                    adapter = self._adapter_for_synthetic_source(source)
+                    if adapter is None:
+                        if sid not in warned_no_route:
+                            warned_no_route.add(sid)
+                            logger.debug(
+                                "loop wakeup: no adapter for platform %r profile=%r (session %s)",
+                                platform_name, getattr(source, "profile", None), sid,
+                            )
                         continue
                     try:
                         session_key = self._session_key_for_source(source)
@@ -24934,6 +24987,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         derived_platform = ""
         derived_chat_type = ""
         derived_chat_id = ""
+        derived_profile: Optional[str] = None
+        structured_session_key = False
 
         if session_key:
             try:
@@ -24954,13 +25009,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             _parsed = _parse_session_key(session_key)
             if _parsed:
+                structured_session_key = True
                 derived_platform = _parsed["platform"]
                 derived_chat_type = _parsed["chat_type"]
                 derived_chat_id = _parsed["chat_id"]
+                derived_profile = str(_parsed.get("profile") or "").strip() or None
 
         evt_platform = str(evt.get("platform") or "").strip().lower()
         evt_chat_type = str(evt.get("chat_type") or "").strip().lower()
         evt_chat_id = str(evt.get("chat_id") or "").strip()
+        evt_profile = str(
+            evt.get("profile") or evt.get("origin_profile") or ""
+        ).strip() or None
         # If a session_key is present, treat it as authoritative over watcher
         # metadata.  The watcher metadata is copied from session env at process
         # start and may be stale after a session split; preferring it is the
@@ -24984,6 +25044,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform_name = derived_platform or evt_platform
         chat_type = derived_chat_type or evt_chat_type
         chat_id = derived_chat_id or evt_chat_id
+        if structured_session_key:
+            profile_name = derived_profile
+            expected_profile = derived_profile or "default"
+            if evt_profile and evt_profile != expected_profile:
+                logger.warning(
+                    "Synthetic process event route mismatch for %s: profile metadata=%s session_key=%s; using session_key",
+                    evt.get("session_id", "unknown"), evt_profile, expected_profile,
+                )
+        else:
+            profile_name = evt_profile
         if not platform_name or not chat_type or not chat_id:
             logger.warning(
                 "Synthetic event source unresolvable: "
@@ -25036,7 +25106,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_id=str(evt.get("user_id") or "").strip() or None,
             user_name=str(evt.get("user_name") or "").strip() or None,
             scope_id=scope_id,
+            profile=profile_name,
         )
+
+    def _adapter_for_synthetic_source(
+        self, source: SessionSource,
+    ) -> Optional[BasePlatformAdapter]:
+        """Resolve synthetic delivery without crossing a profile boundary.
+
+        ``_adapter_for_source`` owns registered-transport, relay provenance, and
+        multiplex profile lookup.  Only an unstamped/default source may use the
+        legacy logical-platform resolver as a relay fallback; a named profile
+        with no live adapter must fail closed rather than borrow the default bot.
+        """
+        adapter = self._adapter_for_source(source)
+        if adapter is not None:
+            return cast(BasePlatformAdapter, adapter)
+
+        profile_name = str(getattr(source, "profile", None) or "").strip()
+        if profile_name and profile_name != "default":
+            return None
+
+        try:
+            transport = resolve_delivery_transport(
+                source.platform, self.config, self.adapters,
+            )
+        except Exception:
+            transport = None
+        return transport.adapter if transport is not None else None
 
     async def _drain_watch_notifications(self, completion_queue) -> None:
         """Consume queued watch events and inject them when notifications are enabled.
@@ -25085,7 +25182,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _sk and _parse_session_key(_sk) is None:
                     raw_sid = _sk
             if raw_sid:
-                adapter = self.adapters.get(Platform.API_SERVER)
+                raw_profile = str(
+                    evt.get("profile") or evt.get("origin_profile") or ""
+                ).strip() or None
+                adapter = self._authorization_adapter(
+                    Platform.API_SERVER, raw_profile,
+                )
                 from gateway.wake import adapter_supports_push, deliver_wake
                 if adapter is not None and not adapter_supports_push(adapter):
                     try:
@@ -25115,35 +25217,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return None
         platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-        # Alias-aware resolution (relay-plane): a relay-fronted gateway
-        # registers ONE adapter under Platform.RELAY fronting N logical
-        # platforms, so a literal ``p.value == platform_name`` scan misses
-        # "slack" and silently drops the completion as "no gateway route"
-        # (staging incident 2026-08-09, second occurrence). Resolve through
-        # the shared transport resolver — native adapter wins; relay is
-        # eligible only when it advertises fronting the logical platform.
-        adapter = None
-        try:
-            _platform_enum = Platform(platform_name)
-        except (ValueError, KeyError):
-            _platform_enum = None
-        if _platform_enum is not None:
-            try:
-                _transport = resolve_delivery_transport(
-                    _platform_enum, self.config, self.adapters,
-                )
-            except Exception:
-                _transport = None
-            if _transport is not None:
-                adapter = _transport.adapter
-        if adapter is None:
-            # Legacy literal scan — still correct for native adapters, and
-            # keeps minimal runner stubs (tests) and exotic platform strings
-            # working when the resolver can't run.
-            for p, a in self.adapters.items():
-                if p.value == platform_name:
-                    adapter = a
-                    break
+        adapter = self._adapter_for_synthetic_source(source)
         if not adapter:
             return None
         from gateway.wake import adapter_supports_push as _wake_push_ok
@@ -25884,6 +25958,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         thread_id = watcher.get("thread_id", "")
         user_id = watcher.get("user_id", "")
         user_name = watcher.get("user_name", "")
+        watcher_profile = str(
+            watcher.get("profile") or watcher.get("origin_profile") or ""
+        ).strip() or None
         message_id = str(watcher.get("message_id") or "").strip() or None
         agent_notify = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
@@ -25899,6 +25976,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "thread_id": thread_id,
                     "user_id": user_id,
                     "user_name": user_name,
+                    "profile": watcher_profile,
                 })
                 if source is None:
                     logger.warning(
@@ -25925,6 +26003,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 thread_id=thread_id or None,
                 user_id=user_id or None,
                 user_name=user_name or None,
+                profile=watcher_profile,
             )
 
         logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
@@ -25989,6 +26068,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "thread_id": thread_id,
                         "user_id": user_id,
                         "user_name": user_name,
+                        "profile": watcher_profile,
                         "message_id": message_id,
                         "started_at": getattr(session, "started_at", None),
                         "command": _command,
@@ -26074,12 +26154,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             f"Here's the final output:\n{new_output}]"
                         )
                     source = _watcher_direct_source()
-                    adapter = None
-                    if source is not None:
-                        for p, a in self.adapters.items():
-                            if p == source.platform:
-                                adapter = a
-                                break
+                    adapter = (
+                        self._adapter_for_synthetic_source(source)
+                        if source is not None else None
+                    )
                     if adapter and source and source.chat_id:
                         try:
                             send_meta = {"thread_id": source.thread_id} if source.thread_id else None
@@ -26107,12 +26185,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"New output:\n{new_output}]"
                 )
                 source = _watcher_direct_source()
-                adapter = None
-                if source is not None:
-                    for p, a in self.adapters.items():
-                        if p == source.platform:
-                            adapter = a
-                            break
+                adapter = (
+                    self._adapter_for_synthetic_source(source)
+                    if source is not None else None
+                )
                 if adapter and source and source.chat_id:
                     try:
                         send_meta = {"thread_id": source.thread_id} if source.thread_id else None

@@ -228,6 +228,45 @@ async def test_direct_background_notification_prefers_session_origin_over_stale_
 
 
 @pytest.mark.asyncio
+async def test_direct_background_notification_uses_named_profile_adapter(
+    monkeypatch, tmp_path
+):
+    """A named-profile process result must never send through the default bot."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    default_adapter = runner.adapters[Platform.TELEGRAM]
+    worker_adapter = SimpleNamespace(send=AsyncMock(), handle_message=AsyncMock())
+    runner._profile_adapters["worker"] = {Platform.TELEGRAM: worker_adapter}
+
+    # Some direct watchers have no structured session key (for example a
+    # reconstructed legacy watcher). Their explicit profile stamp still owns
+    # the transport and must survive the fallback source builder.
+    await runner._run_process_watcher(
+        {
+            "session_id": "proc_worker",
+            "check_interval": 0,
+            "platform": "telegram",
+            "chat_type": "dm",
+            "chat_id": "123",
+            "profile": "worker",
+            "notify_on_complete": False,
+        }
+    )
+
+    worker_adapter.send.assert_awaited_once()
+    default_adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_inject_watch_notification_routes_from_session_store_origin(monkeypatch, tmp_path):
     from gateway.session import SessionSource
 
@@ -260,6 +299,63 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
     assert synth_event.source.thread_id == "42"
     assert synth_event.source.user_id == "123"
     assert synth_event.source.user_name == "Emiliyan"
+
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_uses_named_profile_adapter(monkeypatch, tmp_path):
+    """Synthetic turns retain adapter ownership as well as session ownership."""
+    from gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    default_adapter = runner.adapters[Platform.TELEGRAM]
+    worker_adapter = SimpleNamespace(send=AsyncMock(), handle_message=AsyncMock())
+    runner._profile_adapters["worker"] = {Platform.TELEGRAM: worker_adapter}
+    session_key = "agent:worker:telegram:dm:123"
+    runner.session_store._entries[session_key] = SimpleNamespace(
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+            profile="worker",
+        )
+    )
+
+    result = await runner._inject_watch_notification(
+        "[SYSTEM: Background process matched]",
+        {"session_id": "proc_worker", "session_key": session_key},
+    )
+
+    assert result is True
+    worker_adapter.handle_message.assert_awaited_once()
+    default_adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_named_profile_missing_adapter_fails_closed(
+    monkeypatch, tmp_path
+):
+    """A stamped secondary profile must not fall back to the default bot."""
+    from gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    default_adapter = runner.adapters[Platform.TELEGRAM]
+    session_key = "agent:worker:telegram:dm:123"
+    runner.session_store._entries[session_key] = SimpleNamespace(
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+            profile="worker",
+        )
+    )
+
+    result = await runner._inject_watch_notification(
+        "[SYSTEM: Background process matched]",
+        {"session_id": "proc_worker", "session_key": session_key},
+    )
+
+    assert result is None
+    default_adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -559,6 +655,49 @@ def test_parse_session_key_with_extra_parts():
     assert result == {"platform": "discord", "chat_type": "group", "chat_id": "chan123"}
 
 
+def test_parse_session_key_preserves_named_profile_namespace():
+    result = _parse_session_key("agent:worker:telegram:dm:123")
+    assert result == {
+        "platform": "telegram",
+        "chat_type": "dm",
+        "chat_id": "123",
+        "profile": "worker",
+    }
+
+
+def test_build_process_event_source_recovers_named_profile_after_cache_miss(
+    monkeypatch, tmp_path
+):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    source = runner._build_process_event_source(
+        {
+            "session_id": "proc_worker",
+            "session_key": "agent:worker:telegram:dm:123",
+        }
+    )
+
+    assert source is not None
+    assert source.platform == Platform.TELEGRAM
+    assert source.chat_id == "123"
+    assert source.profile == "worker"
+
+
+def test_structured_session_key_profile_wins_over_stale_event_metadata(
+    monkeypatch, tmp_path
+):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    source = runner._build_process_event_source(
+        {
+            "session_id": "proc_default",
+            "session_key": "agent:main:telegram:dm:123",
+            "origin_profile": "worker",
+        }
+    )
+
+    assert source is not None
+    assert source.profile is None
+
+
 # ---------------------------------------------------------------------------
 # api_server (stateless) wake routing — gateway/wake.py self-post path
 # ---------------------------------------------------------------------------
@@ -596,6 +735,46 @@ async def test_inject_watch_notification_raw_session_key_self_posts(monkeypatch,
     assert posts == [
         {"text": "[SYSTEM: subagent finished]", "session_id": "raw-hq-session-id"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_raw_named_profile_uses_profile_api_adapter(
+    monkeypatch, tmp_path
+):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    default_api_adapter = SimpleNamespace(
+        supports_async_delivery=False,
+        handle_message=AsyncMock(),
+        _host="127.0.0.1", _port=8642, _api_key="default", _model_name="m",
+    )
+    worker_api_adapter = SimpleNamespace(
+        supports_async_delivery=False,
+        handle_message=AsyncMock(),
+        _host="127.0.0.1", _port=8643, _api_key="worker", _model_name="m",
+    )
+    runner.adapters[Platform.API_SERVER] = default_api_adapter
+    runner._profile_adapters["worker"] = {Platform.API_SERVER: worker_api_adapter}
+
+    posts = []
+
+    async def fake_self_post(adapter, *, text, session_id):
+        posts.append((adapter, text, session_id))
+
+    import gateway.wake as wake_mod
+    monkeypatch.setattr(wake_mod, "_self_post_chat_completion", fake_self_post)
+
+    result = await runner._inject_watch_notification(
+        "[SYSTEM: done]",
+        {
+            "session_id": "proc_worker_api",
+            "session_key": "raw-worker-session",
+            "origin_profile": "worker",
+        },
+    )
+
+    assert result is True
+    assert posts == [(worker_api_adapter, "[SYSTEM: done]", "raw-worker-session")]
+    default_api_adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

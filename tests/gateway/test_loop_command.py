@@ -1,7 +1,9 @@
 """Gateway /loop command tests — dispatch, routing capture, mid-run guard."""
 
+import asyncio
 import logging
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -77,6 +79,118 @@ async def test_gateway_loop_create_captures_route(loop_env):
     assert state.route["platform"] == "discord"
     assert state.route["chat_id"] == "chat-loop"
     assert state.route["thread_id"] == "thread-9"
+    assert state.route["profile"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_gateway_loop_create_captures_named_profile(loop_env):
+    runner = _make_runner()
+    event = _make_event("/loop 5m check the deploy")
+    event.source.profile = "worker"
+
+    await GatewayRunner._handle_loop_command(runner, event)
+
+    state = loops.load_loop("sid-gateway-loop")
+    assert state is not None
+    assert state.route["profile"] == "worker"
+
+
+@pytest.mark.asyncio
+async def test_legacy_loop_route_recovers_profile_from_session_record(loop_env):
+    """Routes persisted before profile capture recover their owning namespace."""
+    runner = _make_runner()
+    runner.config.multiplex_profiles = True
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(return_value={"profile_name": "worker"})
+    )
+
+    profile, proven = await GatewayRunner._resolve_loop_route_profile(
+        runner, "sid-legacy-worker", {}
+    )
+
+    assert (profile, proven) == ("worker", True)
+
+
+@pytest.mark.asyncio
+async def test_legacy_loop_route_without_owner_fails_closed(loop_env):
+    """Ambiguous multiplexed legacy routes must never borrow the default bot."""
+    runner = _make_runner()
+    runner.config.multiplex_profiles = True
+    runner._session_db = SimpleNamespace(get_session=AsyncMock(return_value=None))
+
+    profile, proven = await GatewayRunner._resolve_loop_route_profile(
+        runner, "sid-legacy-unknown", {}
+    )
+
+    assert (profile, proven) == (None, False)
+
+
+@pytest.mark.asyncio
+async def test_loop_wakeup_uses_named_profile_adapter(loop_env, monkeypatch):
+    """Legacy persisted wakeups recover and use the profile that owns them."""
+    runner = _make_runner()
+    runner.config.multiplex_profiles = True
+    default_adapter = SimpleNamespace(handle_message=AsyncMock())
+    worker_adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner.adapters = {Platform.DISCORD: default_adapter}
+    runner._profile_adapters = {"worker": {Platform.DISCORD: worker_adapter}}
+    runner._running = True
+    runner._running_agents = {}
+    runner._session_source_cache = {}
+    runner.session_store = SimpleNamespace(_ensure_loaded=lambda: None, _entries={})
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(return_value={"profile_name": "worker"})
+    )
+    runner._warm_goals_session_db = AsyncMock()
+    runner._session_key_for_source = lambda _source: (
+        "agent:worker:discord:channel:chat-loop:thread-9"
+    )
+
+    route = {
+        "platform": "discord",
+        "chat_id": "chat-loop",
+        "chat_type": "channel",
+        "thread_id": "thread-9",
+        "user_id": "user-loop",
+    }
+    loop_state = SimpleNamespace(
+        route=route,
+        awaiting_response=False,
+        next_due_at=0,
+    )
+
+    class _FakeLoopManager:
+        def __init__(self, session_id):
+            self.session_id = session_id
+            self.state = SimpleNamespace(ticks_fired=1)
+
+        def is_due(self, _now):
+            return True
+
+        def fire_tick(self):
+            return "continue the loop"
+
+        def abandon_tick(self):
+            raise AssertionError("named-profile wakeup should be deliverable")
+
+    monkeypatch.setattr(loops, "list_active_loops", lambda: [("sid-loop", loop_state)])
+    monkeypatch.setattr(loops, "LoopManager", _FakeLoopManager)
+    monkeypatch.setattr(loops, "goal_blocks_loop_tick", lambda _sid: False)
+
+    sleep_calls = 0
+
+    async def _bounded_sleep(_delay):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            runner._running = False
+
+    monkeypatch.setattr(asyncio, "sleep", _bounded_sleep)
+
+    await GatewayRunner._loop_wakeup_watcher(runner, interval=0)
+
+    worker_adapter.handle_message.assert_awaited_once()
+    default_adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

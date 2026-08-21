@@ -3095,6 +3095,15 @@ class GatewaySlashCommandsMixin:
             src = event.source
             if src is not None:
                 platform = getattr(src, "platform", "")
+                route_profile = str(getattr(src, "profile", "") or "").strip()
+                if not route_profile:
+                    try:
+                        active_profile = getattr(self, "_active_profile_name", None)
+                        route_profile = str(
+                            active_profile() if callable(active_profile) else "default"
+                        ).strip()
+                    except Exception:
+                        route_profile = "default"
                 route = {
                     "platform": platform.value if hasattr(platform, "value") else str(platform or ""),
                     "chat_id": str(getattr(src, "chat_id", "") or ""),
@@ -3102,6 +3111,10 @@ class GatewaySlashCommandsMixin:
                     "thread_id": str(getattr(src, "thread_id", "") or ""),
                     "user_id": str(getattr(src, "user_id", "") or ""),
                     "user_name": str(getattr(src, "user_name", "") or ""),
+                    # Persist default explicitly. An absent profile is ambiguous
+                    # after multiplexing is enabled and must fail closed on
+                    # legacy recovery rather than borrow the default bot.
+                    "profile": route_profile or "default",
                 }
                 route = {k: v for k, v in route.items() if v}
         except Exception:
