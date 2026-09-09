@@ -219,9 +219,14 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     output = tmp_path / "schemaless-recovered.db"
     _make_schema_unreadable_source(source)
 
+    # Patch the SOURCE module: _recover_via_lost_and_found() re-imports these two
+    # helpers at call time, so the current attribute is what executes. Force the
+    # "no sqlite3 CLI at all" refusal — on dev hosts a real (wal-reset-vulnerable)
+    # CLI would take the other refusal branch and the message differs.
     import hermes_cli.session_lost_and_found as laf
 
     monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)
+    monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {"reason": "missing"})
     with pytest.raises(SessionRecoverySourceError) as excinfo:
         recover_session_database(
             source,

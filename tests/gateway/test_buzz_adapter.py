@@ -3094,6 +3094,8 @@ class TestInboundMediaAuthorizationGate:
         result = await adapter.send_document(CHANNEL, str(media))
 
         assert result.success is False
+        # Redaction contract: the private path components must never leak, the
+        # file name must survive, and the message must be bounded.
         assert all(part not in result.error for part in private_parts)
         assert "handoff.txt" in result.error
         assert len(result.error) <= 900

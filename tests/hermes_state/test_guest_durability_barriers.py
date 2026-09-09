@@ -12,6 +12,7 @@ import sqlite3
 import pytest
 
 import hermes_state
+import hermes_state_wal
 from hermes_state_repair import apply_durability_barriers
 
 
@@ -40,7 +41,11 @@ def test_guest_barriers_apply_configured_synchronous(monkeypatch, tmp_path):
         conn.close()
 
 
-def test_guest_barriers_leave_synchronous_alone_when_unset(monkeypatch, tmp_path):
+def test_guest_barriers_leave_synchronous_alone_when_unset(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(hermes_state_wal, "_enforce_macos_synchronous_full", lambda conn: None)
+    monkeypatch.setattr(hermes_state_wal, "_apply_macos_checkpoint_barrier", lambda conn: None)
     _config(monkeypatch, {})
     conn = sqlite3.connect(tmp_path / "state.db")
     try:

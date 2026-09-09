@@ -95,7 +95,11 @@ def _blocking_probe():
 
 async def _run(adapter, event, response="final answer"):
     adapter._message_handler = AsyncMock(return_value=response)
-    session_key = "agent:main:slack:channel:C1"
+    # Lane key must match the adapter's own session-key derivation (owner
+    # profile included) or the routing guard drops the response as cross-session.
+    session_key = (
+        f"agent:{getattr(adapter, '_owner_profile', None) or 'main'}:slack:channel:C1"
+    )
     adapter._active_sessions[session_key] = asyncio.Event()
     await adapter._process_message_background(event, session_key)
 

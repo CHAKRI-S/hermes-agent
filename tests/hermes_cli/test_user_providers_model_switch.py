@@ -93,6 +93,18 @@ def test_list_authenticated_providers_enumerates_dict_format_models(monkeypatch)
         }
     }
 
+    # A live local Ollama on the dev host (localhost:11434 is Ollama's default
+    # port, so the native-catalog path probes the real daemon) or its persisted
+    # custom-endpoint cache must not inflate the declared catalog: stub the
+    # native fetch and pin the disk cache empty.
+    monkeypatch.setattr(
+        "hermes_cli.models_local.fetch_ollama_local_models",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models._load_provider_models_cache", lambda: {}
+    )
+
     providers = list_authenticated_providers(
         current_provider="local-ollama",
         user_providers=user_providers,
@@ -530,6 +542,17 @@ def test_section3_probes_no_key_endpoint_with_singular_default_model(monkeypatch
         return ["live-model-1", "live-model-2", "live-model-3"]
 
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", _fake_fetch)
+    # Host drift: a live local Ollama (localhost:11434 is the default port, so
+    # `should_use_ollama_native_catalog` probes /api/tags on the real daemon)
+    # and its persisted discovery cache must not shadow the endpoint simulated
+    # here — stub the native fetch the same way as fetch_api_models.
+    monkeypatch.setattr(
+        "hermes_cli.models_local.fetch_ollama_local_models",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models._load_provider_models_cache", lambda: {}
+    )
 
     user_providers = {
         "local-ollama": {

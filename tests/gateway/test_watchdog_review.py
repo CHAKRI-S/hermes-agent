@@ -44,6 +44,10 @@ def test_s1_contended_activity_write_gives_up_within_short_budget(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     sid = "S1_CONTENDED"
     db.create_session(sid, source="cli")
+    # DELETE-journal hosts (WAL-reset-vulnerable SQLite) wait out busy_timeout
+    # per lock transition inside BEGIN IMMEDIATE, inflating elapsed beyond the
+    # budget before the app-level give-up fires. Surface BUSY immediately.
+    db._conn.execute("PRAGMA busy_timeout=0")
 
     held = threading.Event()
     release = threading.Event()
@@ -95,6 +99,8 @@ def test_s1_contended_clear_gives_up_within_short_budget(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     sid = "S1_CLEAR_CONTENDED"
     db.create_session(sid, source="cli")
+    # Same DELETE-journal busy-window host drift as the contended-touch test.
+    db._conn.execute("PRAGMA busy_timeout=0")
     db.touch_session_activity(sid, time.time(), description="busy")
 
     held = threading.Event()

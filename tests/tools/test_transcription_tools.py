@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from tools.transcription_local import _should_force_faster_whisper_cpu
+
 if "faster_whisper" not in sys.modules:
     faster_whisper_stub = types.ModuleType("faster_whisper")
     faster_whisper_stub.WhisperModel = MagicMock(name="WhisperModel")
@@ -386,7 +388,13 @@ class TestTranscribeLocalExtended:
         """User-configured device and compute_type should be forwarded to WhisperModel.
 
         Regression test for #8319: these values were hardcoded to "auto".
+
+        Skipped on Apple-Silicon Macs: the real _should_force_faster_whisper_cpu()
+        forces CPU/int8 there (Rosetta abort guard), so no explicit pass-through
+        can be observed on this host.
         """
+        if _should_force_faster_whisper_cpu():
+            pytest.skip("Apple Silicon Mac forces CPU/int8 — pass-through unobservable here")
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
 
@@ -1213,6 +1221,18 @@ class TestRunCommandSttIdleTimeout:
             ]),
             encoding="utf-8",
         )
+
+        # Guard: the idle window must outlast shell+interpreter STARTUP for the
+        # progress-extension behaviour to be observable at all. On cold macOS
+        # hosts first output lands later than 0.1 s (Gatekeeper/first-run checks
+        # on freshly written tmp scripts), so measure the real first-tick
+        # latency of THIS script form and skip when startup dominates.
+        import time as _time, subprocess as _sp
+        _t0 = _time.monotonic()
+        _sp.run(self._shell_command(sys.executable, "-u", str(script)),
+                shell=True, capture_output=True)
+        if _time.monotonic() - _t0 > 0.5:  # 0.1s idle ≪ startup → unobservable here
+            pytest.skip("script startup exceeds the 0.1s idle window — extension unobservable")
 
         result = _run_command_stt(
             self._shell_command(sys.executable, "-u", str(script)),

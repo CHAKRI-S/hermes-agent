@@ -1608,7 +1608,6 @@ class TestTryPaymentFallback:
         assert label == "nous"
 
 
-
     def test_codex_not_in_fallback_chain(self):
         """Codex is deliberately NOT a fallback rung (shifting model allow-list).
 
@@ -3480,30 +3479,39 @@ class TestCodexAuxiliaryAdapterTimeout:
         assert fake_client.responses.kwargs["stream"] is True
         assert response.choices[0].message.content == "summary"
 
-    def test_enforces_total_timeout_while_stream_keeps_emitting_events(self):
+    def test_enforces_total_timeout_while_stream_keeps_emitting_events(self, monkeypatch):
+        fake_now = 1000.0
+        close_calls = []
+
+        def fake_monotonic():
+            return fake_now
+
+        monkeypatch.setattr("agent.auxiliary_client.time.monotonic", fake_monotonic)
+
         class _SlowAliveCreateStream:
             def __iter__(self):
+                nonlocal fake_now
                 for _ in range(5):
-                    time.sleep(0.03)
+                    fake_now += 0.03
                     yield SimpleNamespace(type="response.in_progress")
 
-            def close(self): pass
+            def close(self):
+                close_calls.append(True)
 
         class FakeResponses:
             def create(self, **kwargs):
                 return _SlowAliveCreateStream()
 
-        fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
+        fake_client = SimpleNamespace(responses=FakeResponses())
         adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
 
-        started = time.monotonic()
         with pytest.raises(TimeoutError):
             adapter.create(
                 messages=[{"role": "user", "content": "summarize this"}],
                 timeout=0.05,
             )
 
-        assert time.monotonic() - started < 0.14
+        assert close_calls == [True]
 
 
 class TestCodexAuxiliaryAdapterCacheScope:

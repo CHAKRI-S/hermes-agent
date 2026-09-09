@@ -354,10 +354,13 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
         self.assertEqual([r["status"] for r in results], ["success"] * 6)
         self.assertEqual(len(_KERNELS), 1)
         live = subprocess.run(
-            ["pgrep", "-fc", "-P", str(os.getpid()), "hermes_kernel_runner"],
+            ["pgrep", "-f", "-P", str(os.getpid()), "hermes_kernel_runner"],
             capture_output=True, text=True,
-        ).stdout.strip()
-        self.assertEqual(live, "1")
+        ).stdout.split()
+        # Count LINES, not a `-c` scalar: BSD pgrep (macOS) has no `-c` flag
+        # (usage error → empty stdout), while Linux pgrep prints the count.
+        # One PID per line works on both; exactly one live kernel must remain.
+        self.assertEqual(len(live), 1)
 
 
 class TestPerCellRpcAuthority(unittest.TestCase):

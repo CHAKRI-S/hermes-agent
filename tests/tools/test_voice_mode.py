@@ -124,7 +124,11 @@ class TestPulseSocketReachable:
     def test_stale_socket_file_not_reachable(self, monkeypatch, tmp_path):
         """A socket file with no listener should not count as reachable."""
         import socket as _socket
-        sock_path = tmp_path / "pulse" / "native"
+        # /tmp: macOS AF_UNIX (104 bytes) overflows under pytest's long tmp_path.
+        import tempfile as _tf
+        short_base = _tf.mkdtemp(prefix="pulse-test-")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", short_base)
+        sock_path = Path(short_base) / "pulse" / "native"
         sock_path.parent.mkdir(parents=True)
         # Create + bind, then close so the path is a stale socket file.
         s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
@@ -139,7 +143,10 @@ class TestPulseSocketReachable:
     def test_listening_socket_reachable_via_xdg_runtime(self, monkeypatch, tmp_path):
         """A live PulseAudio-style socket under XDG_RUNTIME_DIR is reachable (#35622)."""
         import socket as _socket
-        sock_path = tmp_path / "pulse" / "native"
+        # /tmp: macOS AF_UNIX (104 bytes) overflows under pytest's long tmp_path.
+        import tempfile as _tf
+        short_base = _tf.mkdtemp(prefix="pulse-test-")
+        sock_path = Path(short_base) / "pulse" / "native"
         sock_path.parent.mkdir(parents=True)
         server = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         server.bind(str(sock_path))
@@ -147,7 +154,7 @@ class TestPulseSocketReachable:
         try:
             monkeypatch.delenv("PULSE_SERVER", raising=False)
             monkeypatch.delenv("PULSE_RUNTIME_PATH", raising=False)
-            monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+            monkeypatch.setenv("XDG_RUNTIME_DIR", short_base)
             from tools.voice_mode import _pulse_socket_reachable
             assert _pulse_socket_reachable() is True
         finally:
@@ -695,6 +702,7 @@ class TestCleanupTempRecordings:
 # ============================================================================
 
 class TestPlayBeep:
+    @pytest.mark.linux_only
     def test_beep_calls_sounddevice_play(self, mock_sd):
         np = pytest.importorskip("numpy")
 
@@ -1408,12 +1416,16 @@ class TestDefaultInputSamplerate:
             assert wf.getframerate() == 48000
 
 
+@pytest.mark.linux_only
 class TestWSL2PowerShellFallback:
     """Regression tests for WSL2 PowerShell TTS fallback (issue #17608).
 
     On WSL2 without a PulseAudio bridge, ffplay/aplay have no audio device.
     play_audio_file() should insert a PowerShell-based player at the front
     of the player list when powershell.exe and ffmpeg are available.
+
+    linux_only: _system_player_candidates gates the PowerShell bridge on the
+    real host being Linux — no host-OS fakes (suite convention cd4317b449).
     """
 
     def _fake_check_output(self, responses):

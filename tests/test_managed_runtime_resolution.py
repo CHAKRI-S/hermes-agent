@@ -136,11 +136,19 @@ def _source_files() -> list[Path]:
     # subtrees entirely.
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         rel_dir = Path(dirpath).relative_to(REPO_ROOT)
-        if rel_dir == Path("."):
-            dirnames[:] = [
-                d for d in dirnames
-                if d not in _EXEMPT_DIRS and not _is_packaging_copy(d)
-            ]
+        # A ``pyvenv.cfg`` marker marks a virtualenv root at ANY depth: prune it
+        # and its whole subtree (tooling keeps leaving aptly-named venvs in-tree,
+        # e.g. ``.venv-upstream-sync`` or ``.hermes-runtime/venv-candidate-*``;
+        # their site-packages are third-party code, never Hermes source).
+        # Top-level exemptions and packaging copies only apply at the repo root.
+        pruned = []
+        for d in dirnames:
+            if d in _EXEMPT_DIRS or _is_virtualenv_dir(Path(dirpath) / d):
+                continue
+            if rel_dir == Path(".") and _is_packaging_copy(d):
+                continue
+            pruned.append(d)
+        dirnames[:] = pruned
         for fname in filenames:
             if fname.endswith(".py"):
                 files.append(Path(dirpath) / fname)
@@ -156,6 +164,20 @@ def _is_packaging_copy(top_level: str) -> bool:
     if not candidate.is_dir():
         return False
     return (candidate / "PKG-INFO").exists()
+
+
+@functools.lru_cache(maxsize=None)
+def _is_virtualenv_dir(child: Path) -> bool:
+    """Whether *child* (a directory at ANY depth under REPO_ROOT) is a virtualenv.
+
+    Tooling routinely creates aptly-named-but-not-exempt venvs in-tree (e.g.
+    ``.venv-upstream-sync`` for a sync workspace, ``venv.stale.runtime-*`` left by
+    the managed-runtime updater, ``.hermes-runtime/venv-candidate-*``). Their
+    installed site-packages are third-party code, never Hermes source, and the
+    WAL-reset guard fires on their imports. A ``pyvenv.cfg`` marker is the
+    portable virtualenv signature.
+    """
+    return child.is_dir() and (child / "pyvenv.cfg").exists()
 
 
 def _findings() -> list[tuple[str, str, int]]:

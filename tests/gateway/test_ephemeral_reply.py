@@ -32,7 +32,7 @@ from gateway.platforms.base import (
     SendResult,
 )
 from gateway.platforms.event import MessageEvent, MessageType
-from gateway.session import SessionSource
+from gateway.session import SessionSource, build_session_key
 
 
 class _NoDeleteAdapter(BasePlatformAdapter):
@@ -186,7 +186,7 @@ async def test_process_message_unwraps_ephemeral_before_send():
         sleeps.append(duration)
 
     event = _make_event()
-    session_key = "agent:main:telegram:private:42"
+    session_key = build_session_key(event.source)
     with patch("gateway.platforms.base.asyncio.sleep", _fake_sleep), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):
@@ -225,7 +225,7 @@ async def test_process_message_incapable_platform_does_not_schedule_delete():
     adapter.delete_message = _spy_delete  # type: ignore[assignment]
 
     event = _make_event()
-    session_key = "agent:main:telegram:private:42"
+    session_key = build_session_key(event.source)
     with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):

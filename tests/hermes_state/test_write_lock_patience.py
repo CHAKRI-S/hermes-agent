@@ -85,6 +85,12 @@ class TestTranscriptWritePatience:
         """When patience genuinely runs out, the error must say the lock was
         held by another process — not read like disk/permission damage."""
         monkeypatch.setattr(SessionDB, "_WRITE_PATIENCE_S", 0.2)
+        # Host drift: on a WAL-reset-vulnerable SQLite (DELETE journal) BEGIN
+        # IMMEDIATE waits out one full busy_timeout window PER lock transition,
+        # so a 2s hold is consumed inside SQLite before the application-level
+        # retry loop ever sees a BUSY. Zero the busy window so SQLITE_BUSY
+        # surfaces immediately and the patience budget is what's under test.
+        db._conn.execute("PRAGMA busy_timeout=0")
 
         started = threading.Event()
         holder = threading.Thread(

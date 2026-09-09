@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 from tools.computer_use import cua_backend
+from tools.computer_use import cua_backend_daemon
 from tools.computer_use import cua_backend_driver
 
 
@@ -232,11 +233,18 @@ class TestEmbeddedDaemonOverlayFlag:
         process = MagicMock()
         process.poll.return_value = None
         status = MagicMock(returncode=0)
+        app_path = "/Applications/CuaDriver.app"
 
         with patch.object(
             cua_backend_driver,
             "_resolve_mcp_invocation",
             return_value=("/usr/bin/cua-driver", ["mcp"]),
+        ), patch.object(
+            cua_backend_daemon, "_resolve_cua_driver_app_path", return_value=app_path,
+        ), patch.object(
+            # This test pins the overlay flag in the spawn argv, not the codesign
+            # gate — skip signature validation so no real codesign probe runs.
+            cua_backend_daemon, "_validate_cua_driver_app_signature", lambda app_path: None,
         ), patch.object(
             cua_backend, "_cua_no_overlay", return_value=True,
         ), patch.object(
@@ -249,5 +257,14 @@ class TestEmbeddedDaemonOverlayFlag:
             daemon.start()
 
         command = popen.call_args.args[0]
-        assert command[:2] == ["/usr/bin/cua-driver", "serve"]
+        # macOS launches private daemons through LaunchServices so TCC stays
+        # attached to the signed bundle: [open, -n, -g, -a, APP, --args, *serve_argv]
+        # (the bundle supplies the binary; no driver argv element). Linux spawns
+        # [driver, *serve_argv] directly. Normalize both to the bare serve argv —
+        # the overlay flag must ride along on either launch shape.
+        if command[:1] == ["/usr/bin/open"]:
+            command = command[command.index("--args") + 1:]
+        if command[:1] == ["/usr/bin/cua-driver"]:
+            command = command[1:]
+        assert command[0] == "serve"
         assert "--no-overlay" in command

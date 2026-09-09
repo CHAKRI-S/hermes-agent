@@ -116,6 +116,10 @@ class TestCommandTimeoutRecovery:
         monkeypatch.setattr("tools.browser_tool_cdp._ensure_cdp_supervisor", lambda _: supervisor_events.append("ensure"))
         monkeypatch.setattr("tools.browser_tool_cdp._stop_cdp_supervisor", lambda _: supervisor_events.append("stop"))
         monkeypatch.setattr(bt, "_socket_safe_tmpdir", lambda: str(tmp_path))
+        # Keep the preflight Chromium probe deterministic: CI builders ship a
+        # browser on PATH, dev containers may not — the timeout contract under
+        # test must not depend on that host drift.
+        monkeypatch.setattr(bt_install, "_chromium_installed", lambda: True)
         monkeypatch.setattr("tools.browser_tool_lifecycle._write_owner_pid", lambda *_args: None)
         monkeypatch.setattr(bt, "_build_browser_env", lambda: {})
         monkeypatch.setattr("tools.browser_tool_install._merge_browser_path", lambda value: value)

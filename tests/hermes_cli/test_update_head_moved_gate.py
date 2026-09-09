@@ -16,6 +16,7 @@ import pytest
 from hermes_cli import main as hermes_main
 import hermes_cli.main_web_build as main_web_build
 import hermes_cli.main_install_repair as main_install_repair
+import hermes_cli.update_cmd_fleet as update_cmd_fleet
 from hermes_cli import update_cmd
 
 
@@ -126,6 +127,21 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     )
     monkeypatch.setattr(
         hermes_gateway, "find_profile_gateway_processes", lambda *a, **k: []
+    )
+    # macOS dev-host parity: without these, the success-path probes see the REAL
+    # machine's gateways — ``_get_service_pids`` reads the live ps table and the
+    # launchd arm enumerates ~/Library/LaunchAgents/ai.hermes.gateway* and would
+    # drain/kickstart actual services mid-test. CI (Linux) has neither, which is
+    # the host-independent surface these assertions cover.
+    monkeypatch.setattr(
+        hermes_gateway, "_get_service_pids", lambda all_profiles=False: set()
+    )
+    monkeypatch.setattr(
+        hermes_gateway, "launchd_gateway_labels_for_install", lambda: []
+    )
+    monkeypatch.setattr(
+        update_cmd_fleet, "_restart_launchd_gateway_after_update",
+        lambda *, supervision_verify=True: ([], []),
     )
 
 

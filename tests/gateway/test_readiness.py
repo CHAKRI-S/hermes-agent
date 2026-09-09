@@ -9,6 +9,8 @@ from gateway.readiness import collect_runtime_readiness
 
 
 def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monkeypatch):
+    import gateway.readiness as readiness_mod
+
     home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
@@ -18,6 +20,9 @@ def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monke
     with sqlite3.connect(home / "state.db") as conn:
         conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    # Host drift: the dev volume's real fill level (APFS reports ~96% even when
+    # `df` shows 31%) must not decide this contract — stub a known-healthy disk.
+    monkeypatch.setattr(readiness_mod, "_probe_disk", lambda _home: {"status": "ok"})
 
     result = collect_runtime_readiness(
         configured_model="test/model",

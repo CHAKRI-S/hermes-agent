@@ -138,6 +138,8 @@ async def test_forked_session_stays_listable_and_parent_survives_failed_fork(ada
 @pytest.mark.asyncio
 async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeypatch):
     """API-server request sessions should reach tools and terminal subprocess env."""
+    from gateway.platforms.api_server import _api_request_profile
+
     monkeypatch.setenv("HERMES_SESSION_ID", "stale-session")
     observed = {}
 
@@ -157,6 +159,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
             observed["context_session_id"] = get_session_env("HERMES_SESSION_ID")
             observed["context_platform"] = get_session_env("HERMES_SESSION_PLATFORM")
             observed["context_session_key"] = get_session_env("HERMES_SESSION_KEY")
+            observed["context_profile"] = get_session_env("HERMES_SESSION_PROFILE")
             observed["child_session_id"] = _make_run_env({}).get("HERMES_SESSION_ID")
             return {"final_response": "ok"}
 
@@ -165,12 +168,16 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
 
     monkeypatch.setattr(adapter, "_create_agent", fake_create_agent)
 
-    result, usage = await adapter._run_agent(
-        user_message="hello",
-        conversation_history=[],
-        session_id="request-session",
-        gateway_session_key="request-key",
-    )
+    profile_token = _api_request_profile.set("worker")
+    try:
+        result, usage = await adapter._run_agent(
+            user_message="hello",
+            conversation_history=[],
+            session_id="request-session",
+            gateway_session_key="request-key",
+        )
+    finally:
+        _api_request_profile.reset(profile_token)
 
     assert result["session_id"] == "request-session"
     assert usage["input_tokens"] == 0
@@ -182,6 +189,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         "context_session_id": "request-session",
         "context_platform": "api_server",
         "context_session_key": "request-key",
+        "context_profile": "worker",
         "child_session_id": "request-session",
     }
 

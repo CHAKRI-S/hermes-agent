@@ -553,7 +553,10 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
     monkeypatch.setattr(scheduler, "heartbeat_fire_claim", heartbeat)
     monkeypatch.setattr(scheduler, "_run_one_job_body", run_body)
     monkeypatch.setattr(scheduler, "_RUN_CLAIM_HEARTBEAT_SECONDS", 0.01)
-    monkeypatch.setattr(scheduler, "_FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS", 0.03)
+    # Wide-but-bounded grace: the watcher must get MANY failing ticks before the
+    # ceiling expires even on a loaded runner (0.03 gave it one tick on darwin
+    # under -j24, so `calls >= 3` became a scheduling coin-flip).
+    monkeypatch.setattr(scheduler, "_FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS", 0.3)
 
     assert scheduler.run_one_job(job) is True
     assert calls >= 3

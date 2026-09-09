@@ -2004,6 +2004,11 @@ class TestSystemdCgroupIsolation:
             "gateway.status.get_running_pid",
             lambda *, cleanup_stale=False: os.getpid(),
         )
+        # systemd scopes are a Linux-only feature upstream; the scope-path tests
+        # simulate a Linux gateway regardless of the dev host OS (macOS dev).
+        # Tests that verify the darwin no-op set _IS_LINUX=False AFTER this
+        # fixture, overriding it.
+        monkeypatch.setattr("tools.process_registry._IS_LINUX", True)
 
     def _fake_popen_capture(self):
         """Return (fake_popen, captured) where captured["argv"] gets the
@@ -2469,8 +2474,10 @@ class TestSystemdCgroupIsolation:
         not re-probe (and must return the same value)."""
         import tools.process_registry as pr
 
-        # Reset the cache.
+        # Reset the cache. Probe only executes on Linux (upstream contract);
+        # simulate a Linux host since macOS dev boxes never probe.
         monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_IS_LINUX", True)
         probe_calls = []
 
         def fake_run(*args, **kwargs):
@@ -2575,6 +2582,7 @@ class TestSystemdCgroupIsolation:
         import tools.process_registry as pr
 
         monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_IS_LINUX", True)  # probe is Linux-gated upstream
         probe_started = threading.Event()
         release_probe = threading.Event()
         probe_calls = []
@@ -2619,6 +2627,7 @@ class TestSystemdCgroupIsolation:
 
         monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
         monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_PROBED_AT", 0.0, raising=False)
+        monkeypatch.setattr(pr, "_IS_LINUX", True)  # probe is Linux-gated upstream
         clock = [100.0]
         probe_results = [1, 0]
         probe_calls = []
