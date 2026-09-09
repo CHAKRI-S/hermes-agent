@@ -130,6 +130,12 @@ def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
+
+    # Inline shell so we don't have to ship a helper script.  bash -c is
+    # available on every POSIX target we support; on Windows we just skip
+    # the snapshot (the platform doesn't ship ps anyway).  The timeout is
+    # enforced by a tiny Python wrapper rather than the GNU ``timeout``
+    # executable, which is not available on macOS by default.
     if sys.platform == "win32":
         return None
     script = (
@@ -146,16 +152,48 @@ def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
         fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     except OSError:
         return None
-    try:  # start_new_session: outlive systemd killing our cgroup (KillMode=control-group) to flush
-        return subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script], stdout=fd,
-            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-            close_fds=True).pid
-    except OSError:
+
+    try:
+        # Detach from our process group so the subprocess survives even
+        # if systemd kills our cgroup with KillMode=control-group (which
+        # would also reap us anyway, but defense in depth).  Without
+        # start_new_session, a SIGKILL on our cgroup takes the diag down
+        # before it can flush.
+        timeout_runner = (
+            "import subprocess,sys; "
+            "timeout=float(sys.argv[1]); command=sys.argv[2:]; "
+            "\ntry: subprocess.run(command, timeout=timeout, stdin=subprocess.DEVNULL, check=False)"
+            "\nexcept subprocess.TimeoutExpired: pass"
+        )
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                timeout_runner,
+                str(timeout_seconds),
+                "bash",
+                "-c",
+                script,
+            ],
+            stdout=fd,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except (FileNotFoundError, OSError):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         return None
     finally:
         with contextlib.suppress(OSError):  # subprocess inherited the fd; drop our handle
             os.close(fd)
+    # Contract (docstring + TestSpawnAsyncDiagnostic): return the spawned
+    # diagnostic's PID. This returns-None regression is exactly the
+    # "dropped tail" rebase class — the Popen ran fine, the tail was lost.
+    return proc.pid
 
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:
