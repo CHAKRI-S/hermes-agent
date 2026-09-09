@@ -1,5 +1,6 @@
 """Tests for native Discord slash command fast-paths (thread creation & auto-thread)."""
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import sys
@@ -142,6 +143,71 @@ async def test_registers_native_thread_slash_command(adapter):
 
 
 @pytest.mark.asyncio
+async def test_registers_native_read_slash_command(adapter):
+    adapter._run_read_history_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    command = adapter._client.tree.commands["read"]
+    assert inspect.signature(command).parameters["prompt"].default is inspect.Parameter.empty
+    interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()))
+
+    await command(interaction, prompt="สรุปจากตรงนี้", limit=500)
+
+    interaction.response.defer.assert_not_awaited()
+    adapter._run_read_history_slash.assert_awaited_once_with(
+        interaction,
+        "read",
+        "สรุปจากตรงนี้",
+        limit=500,
+    )
+
+
+@pytest.mark.asyncio
+async def test_registers_native_threadread_slash_command(adapter):
+    adapter._handle_thread_read_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    command = adapter._client.tree.commands["threadread"]
+    assert inspect.signature(command).parameters["prompt"].default is inspect.Parameter.empty
+    interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()))
+
+    await command(
+        interaction,
+        name="Planning Context",
+        prompt="สรุปก่อนหน้า",
+        limit=500,
+        auto_archive_duration=1440,
+    )
+
+    interaction.response.defer.assert_not_awaited()
+    adapter._handle_thread_read_slash.assert_awaited_once_with(
+        interaction,
+        limit=500,
+        name="Planning Context",
+        prompt="สรุปก่อนหน้า",
+        auto_archive_duration=1440,
+    )
+
+
+
+@pytest.mark.asyncio
+async def test_registers_native_restart_slash_command(adapter):
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    assert "restart" in adapter._client.tree.commands
+
+    interaction = SimpleNamespace()
+    await adapter._client.tree.commands["restart"](interaction)
+
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction,
+        "/restart",
+        "Restart requested~",
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter):
     class UnknownInteraction(Exception):
         status = 404
@@ -175,6 +241,133 @@ async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter)
 
 
 @pytest.mark.asyncio
+async def test_auto_registers_missing_gateway_commands(adapter):
+    """Commands in COMMAND_REGISTRY that aren't explicitly registered should
+    be auto-registered by the dynamic catch-all block."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    tree_names = set(adapter._client.tree.commands.keys())
+
+    # These commands are gateway-available but were not in the original
+    # hardcoded registration list — they should be auto-registered.
+    expected_auto = {"debug", "yolo", "profile", "plan_sprint", "run_sprint", "continue_sprint", "auto_agent"}
+    for name in expected_auto:
+        assert name in tree_names, f"/{name} should be auto-registered on Discord"
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_command_dispatches_correctly(adapter):
+    """Auto-registered commands should dispatch via _run_simple_slash."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    # /debug has no args — test parameterless dispatch
+    debug_cmd = adapter._client.tree.commands["debug"]
+    interaction = SimpleNamespace()
+    adapter._run_simple_slash.reset_mock()
+    await debug_cmd.callback(interaction)
+    adapter._run_simple_slash.assert_awaited_once_with(interaction, "/debug")
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_command_with_args(adapter):
+    """Auto-registered commands with args_hint should accept an optional args param."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    # /branch has args_hint="[name]" — test dispatch with args
+    branch_cmd = adapter._client.tree.commands["branch"]
+    interaction = SimpleNamespace()
+    adapter._run_simple_slash.reset_mock()
+    await branch_cmd.callback(interaction, args="my-branch")
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction, "/branch my-branch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sprint_auto_registered_commands_keep_acknowledgement(adapter):
+    """Sprint shortcut commands should keep a visible ephemeral acknowledgement.
+
+    Without an explicit followup, _run_simple_slash deletes the deferred
+    interaction response after dispatch, making native slash invocations feel
+    like they disappeared.
+    """
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    run_cmd = adapter._client.tree.commands["run_sprint"]
+    interaction = SimpleNamespace()
+    await run_cmd.callback(interaction, args="auto")
+
+    adapter._run_simple_slash.assert_awaited_once()
+    called_interaction, command_text, followup = adapter._run_simple_slash.await_args.args
+    assert called_interaction is interaction
+    assert command_text == "/run_sprint auto"
+    assert "Accepted `/run_sprint auto`" in followup
+    assert "sent it to Hermes" in followup
+
+    adapter._run_simple_slash.reset_mock()
+    adapter._inject_sprint_shortcut_context = AsyncMock(
+        return_value="/plan_sprint [Discord history including bot answer]"
+    )
+    plan_cmd = adapter._client.tree.commands["plan_sprint"]
+    await plan_cmd.callback(interaction, args="")
+    adapter._inject_sprint_shortcut_context.assert_awaited_once_with(
+        "/plan_sprint",
+        interaction,
+    )
+    _, command_text, followup = adapter._run_simple_slash.await_args.args
+    assert command_text == "/plan_sprint [Discord history including bot answer]"
+    assert "infer the goal from context" in followup
+
+
+@pytest.mark.asyncio
+async def test_plan_sprint_without_args_injects_recent_history_with_bot_replies(adapter):
+    """Context-free native /plan_sprint should see the visible prior bot answer.
+
+    The normal /read history path skips bot messages to avoid feedback loops,
+    but /plan_sprint with no goal needs the immediately preceding Hermes
+    recommendation when the user turns that recommendation into a plan.
+    """
+
+    class FakeHistoryChannel:
+        name = "evara-rent"
+
+        async def history(self, **_kwargs):
+            messages = [
+                SimpleNamespace(
+                    author=SimpleNamespace(bot=True, display_name="HermesGPT", name="HermesGPT"),
+                    type=SimpleNamespace(name="default"),
+                    clean_content="ควรทำต่ออันดับ 1: Booking Flow จริงแบบครบวงจร",
+                    content="",
+                    attachments=[],
+                    created_at=None,
+                ),
+                SimpleNamespace(
+                    author=SimpleNamespace(bot=False, display_name="Tik", name="tikchakri"),
+                    type=SimpleNamespace(name="default"),
+                    clean_content="ควรพัฒนาฟีเจอร์อะไรเพิ่มเติม",
+                    content="",
+                    attachments=[],
+                    created_at=None,
+                ),
+            ]
+            for message in messages:
+                yield message
+
+    interaction = SimpleNamespace(channel=FakeHistoryChannel())
+
+    command_text = await adapter._inject_sprint_shortcut_context("/plan_sprint", interaction)
+
+    assert command_text.startswith("/plan_sprint [Discord history: last 20 messages from #evara-rent]")
+    assert "Tik: ควรพัฒนาฟีเจอร์อะไรเพิ่มเติม" in command_text
+    assert "HermesGPT: ควรทำต่ออันดับ 1: Booking Flow จริงแบบครบวงจร" in command_text
+    assert "immediately preceding recommendation" in command_text
+
+
+@pytest.mark.asyncio
 async def test_auto_registers_plugin_commands_for_discord(adapter):
     """Plugin slash commands should appear as native Discord app commands."""
     adapter._run_simple_slash = AsyncMock()
@@ -201,6 +394,60 @@ async def test_auto_registers_plugin_commands_for_discord(adapter):
     adapter._run_simple_slash.assert_awaited_once_with(
         interaction, "/metricas dias:7 formato:json"
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_plugin_prompt_hint_uses_prompt_option(adapter):
+    """Plugin commands with args_hint='prompt' should mirror /steer's prompt option."""
+    adapter._run_simple_slash = AsyncMock()
+
+    with patch(
+        "hermes_cli.plugins.get_plugin_commands",
+        return_value={
+            "obsidian": {
+                "handler": lambda _a: "ok",
+                "description": "Search Obsidian vault",
+                "args_hint": "prompt",
+                "plugin": "hermes-obsidian-plugin",
+            }
+        },
+    ):
+        adapter._register_slash_commands()
+
+    obsidian_cmd = adapter._client.tree.commands["obsidian"]
+    assert "prompt" in obsidian_cmd.callback.__annotations__
+    assert "args" not in obsidian_cmd.callback.__annotations__
+
+    interaction = SimpleNamespace()
+    await obsidian_cmd.callback(interaction, prompt="project decision")
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction, "/obsidian project decision"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_plugin_command_without_args_hint(adapter):
+    """Plugin commands without args_hint should register as parameterless."""
+    adapter._run_simple_slash = AsyncMock()
+
+    with patch(
+        "hermes_cli.plugins.get_plugin_commands",
+        return_value={
+            "ping": {
+                "handler": lambda _a: "pong",
+                "description": "Ping the plugin",
+                "args_hint": "",
+                "plugin": "ping-plugin",
+            }
+        },
+    ):
+        adapter._register_slash_commands()
+
+    assert "ping" in adapter._client.tree.commands
+    ping_cmd = adapter._client.tree.commands["ping"]
+    interaction = SimpleNamespace()
+    await ping_cmd.callback(interaction)
+    adapter._run_simple_slash.assert_awaited_once_with(interaction, "/ping")
 
 
 @pytest.mark.asyncio
@@ -316,6 +563,239 @@ async def test_handle_thread_create_slash_reports_success(adapter):
     args, kwargs = interaction.followup.send.await_args
     assert "<#555>" in args[0]
     assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_thread_create_slash_dispatches_session_when_message_provided(adapter):
+    """When a message is given, _dispatch_thread_session should be called."""
+    created_thread = SimpleNamespace(id=555, name="Planning", send=AsyncMock())
+    parent_channel = SimpleNamespace(create_thread=AsyncMock(return_value=created_thread))
+    interaction = SimpleNamespace(
+        channel=SimpleNamespace(parent=parent_channel),
+        channel_id=123,
+        user=SimpleNamespace(display_name="Jezza", id=42),
+        guild=SimpleNamespace(name="TestGuild"),
+        followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+    )
+
+    adapter._dispatch_thread_session = AsyncMock()
+
+    await adapter._handle_thread_create_slash(interaction, "Planning", "Hello Hermes", 1440)
+
+    adapter._dispatch_thread_session.assert_awaited_once_with(
+        interaction, "555", "Planning", "Hello Hermes",
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_thread_create_slash_no_dispatch_without_message(adapter):
+    """Without a message, no session dispatch should occur."""
+    created_thread = SimpleNamespace(id=555, name="Planning", send=AsyncMock())
+    parent_channel = SimpleNamespace(create_thread=AsyncMock(return_value=created_thread))
+    interaction = SimpleNamespace(
+        channel=SimpleNamespace(parent=parent_channel),
+        channel_id=123,
+        user=SimpleNamespace(display_name="Jezza", id=42),
+        guild=SimpleNamespace(name="TestGuild"),
+        followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+    )
+
+    adapter._dispatch_thread_session = AsyncMock()
+
+    await adapter._handle_thread_create_slash(interaction, "Planning", "", 1440)
+
+    adapter._dispatch_thread_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_thread_read_slash_creates_thread_and_dispatches_read_history(adapter):
+    class HistoryChannel:
+        id = 123
+        name = "control"
+        parent = None
+        guild = SimpleNamespace(name="TestGuild")
+        topic = None
+
+        def __init__(self):
+            self.calls = []
+            self.create_thread = AsyncMock(
+                return_value=SimpleNamespace(id=555, name="Planning Context", send=AsyncMock())
+            )
+
+        def history(self, **kwargs):
+            self.calls.append(kwargs)
+
+            async def _aiter():
+                yield SimpleNamespace(
+                    id=1,
+                    content="ก่อนหน้าเราคุยเรื่อง thread context",
+                    clean_content="ก่อนหน้าเราคุยเรื่อง thread context",
+                    author=SimpleNamespace(display_name="Tik", name="Tik", bot=False),
+                    created_at=None,
+                    type=SimpleNamespace(name="default"),
+                    attachments=[],
+                )
+
+            return _aiter()
+
+    channel = HistoryChannel()
+    interaction = SimpleNamespace(
+        channel=channel,
+        channel_id=123,
+        user=SimpleNamespace(display_name="Jezza", id=42),
+        guild=SimpleNamespace(name="TestGuild"),
+        followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    adapter._dispatch_thread_session = AsyncMock()
+
+    await adapter._handle_thread_read_slash(
+        interaction,
+        limit=200,
+        name="Planning Context",
+        prompt="สรุป context เพื่อเริ่ม thread นี้",
+        auto_archive_duration=1440,
+    )
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    channel.create_thread.assert_awaited_once_with(
+        name="Planning Context",
+        auto_archive_duration=1440,
+        reason="Requested by Jezza via /thread",
+    )
+    assert channel.calls == [{"limit": 201}]
+    adapter._dispatch_thread_session.assert_awaited_once()
+    interaction.edit_original_response.assert_awaited_once()
+    args, kwargs = interaction.edit_original_response.await_args
+    assert "Created thread <#555>" in kwargs["content"]
+    _, thread_id, thread_name, text = adapter._dispatch_thread_session.await_args.args
+    assert thread_id == "555"
+    assert thread_name == "Planning Context"
+    assert "[Discord history: last 200 messages from #control]" in text
+    assert "Tik: ก่อนหน้าเราคุยเรื่อง thread context" in text
+    assert "User question:\nสรุป context เพื่อเริ่ม thread นี้" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_read_text_reply_anchors_history(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+
+    class HistoryChannel:
+        id = 123
+        name = "control"
+        guild = SimpleNamespace(name="TestGuild", id=99)
+        topic = None
+
+        def __init__(self):
+            self.calls = []
+
+        def history(self, **kwargs):
+            self.calls.append(kwargs)
+
+            async def _aiter():
+                yield SimpleNamespace(
+                    id=1,
+                    content="ก่อนข้อความ anchor",
+                    clean_content="ก่อนข้อความ anchor",
+                    author=SimpleNamespace(display_name="Tik", name="Tik", bot=False),
+                    created_at=None,
+                    type=SimpleNamespace(name="default"),
+                    attachments=[],
+                )
+
+            return _aiter()
+
+    channel = HistoryChannel()
+    anchor = SimpleNamespace(
+        id=777,
+        content="ข้อความที่คลิก reply",
+        clean_content="ข้อความที่คลิก reply",
+        author=SimpleNamespace(display_name="Somchai", name="Somchai", bot=False),
+        created_at=None,
+        type=SimpleNamespace(name="default"),
+        attachments=[],
+    )
+    reference = SimpleNamespace(message_id=777, resolved=anchor)
+    msg = _fake_message(
+        channel,
+        content="/read limit: 500 prompt: สรุปจากข้อความนี้ย้อนหลัง",
+        display_name="Tik",
+        reference=reference,
+    )
+    adapter._auto_create_thread = AsyncMock()
+    adapter.handle_message = AsyncMock()
+
+    await adapter._handle_message(msg)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    assert channel.calls == [{"limit": 499, "before": anchor}]
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert "[Discord history: last 500 messages up to replied message from #control]" in event.text
+    assert "Somchai: ข้อความที่คลิก reply" in event.text
+    assert "User question:\nสรุปจากข้อความนี้ย้อนหลัง" in event.text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_threadread200_text_fallback_creates_thread_and_reads_history(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+
+    class HistoryChannel:
+        id = 123
+        name = "control"
+        parent = None
+        guild = SimpleNamespace(name="TestGuild", id=99)
+        topic = None
+
+        def __init__(self):
+            self.calls = []
+            self.create_thread = AsyncMock(
+                return_value=SimpleNamespace(id=555, name="Planning Context", send=AsyncMock())
+            )
+            self.send = AsyncMock()
+
+        def history(self, **kwargs):
+            self.calls.append(kwargs)
+
+            async def _aiter():
+                yield SimpleNamespace(
+                    id=1,
+                    content="ก่อนหน้ามี context สำคัญ",
+                    clean_content="ก่อนหน้ามี context สำคัญ",
+                    author=SimpleNamespace(display_name="Tik", name="Tik", bot=False),
+                    created_at=None,
+                    type=SimpleNamespace(name="default"),
+                    attachments=[],
+                )
+
+            return _aiter()
+
+    channel = HistoryChannel()
+    msg = _fake_message(
+        channel,
+        content='/threadread name: "Planning Context" limit: 500 prompt: สรุปก่อนเริ่มงาน',
+        display_name="Tik",
+    )
+    adapter._dispatch_thread_session = AsyncMock()
+    adapter._auto_create_thread = AsyncMock()
+
+    await adapter._handle_message(msg)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    channel.create_thread.assert_awaited_once()
+    assert channel.calls == [{"limit": 501, "before": msg}]
+    adapter._dispatch_thread_session.assert_awaited_once()
+    _, thread_id, thread_name, text = adapter._dispatch_thread_session.await_args.args
+    assert thread_id == "555"
+    assert thread_name == "Planning Context"
+    assert "[Discord history: last 500 messages from #control]" in text
+    assert "Tik: ก่อนหน้ามี context สำคัญ" in text
+    assert "User question:\nสรุปก่อนเริ่มงาน" in text
 
 
 @pytest.mark.asyncio
@@ -493,14 +973,14 @@ class _FakeThreadChannel(_discord_mod.Thread):
         return _empty()
 
 
-def _fake_message(channel, *, content="Hello", author_id=42, display_name="Jezza"):
+def _fake_message(channel, *, content="Hello", author_id=42, display_name="Jezza", reference=None):
     return SimpleNamespace(
         author=SimpleNamespace(id=author_id, display_name=display_name, bot=False),
         content=content,
         channel=channel,
         attachments=[],
         mentions=[],
-        reference=None,
+        reference=reference,
         created_at=None,
         id=12345,
     )

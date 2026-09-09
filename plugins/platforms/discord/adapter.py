@@ -26,6 +26,7 @@ import time
 import traceback
 from collections import defaultdict
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Any, Tuple
 from urllib.parse import quote, urljoin
 
@@ -93,6 +94,31 @@ _DISCORD_MAX_APP_COMMANDS = 100
 #   [(choice label, value), ...] or None)], command-text template, follow-up message)
 # Placeholders are the arg names; text is `.strip()`ped unless ``strip`` is False.
 _REQUIRED = object()
+_AUTO_ACK_COMMANDS = {"plan_sprint", "run_sprint", "continue_sprint", "auto_agent"}
+
+
+def _followup_for_auto_command(name: str, command_text: str) -> Optional[str]:
+    """Visible ephemeral acknowledgement for auto-registered sprint shortcuts."""
+    if name not in _AUTO_ACK_COMMANDS:
+        return None
+    preview = command_text.strip()
+    if len(preview) > 96:
+        preview = preview[:93].rstrip() + "..."
+    if name == "plan_sprint" and command_text.strip() == "/plan_sprint":
+        return "Accepted `/plan_sprint` — Hermes will infer the goal from context or ask one short follow-up."
+    return f"Accepted `{preview}` and sent it to Hermes~"
+
+
+class _EmptyDefaults(dict):
+    """format_map base that renders missing keys as empty strings."""
+
+    def __missing__(self, key):
+        return ""
+
+
+_SPRINT_SHORTCUT_COMMANDS = {"plan_sprint", "run_sprint", "continue_sprint"}
+
+
 _NATIVE_SLASH_COMMANDS: tuple = (
     ("new", "Start a new conversation", (), "/reset", "New conversation started~"),
     ("reset", "Reset your Hermes session", (), "/reset", "Session reset~"),
@@ -518,6 +544,47 @@ def _looks_like_nonconversational_history_message(content: str) -> bool:
     """Fallback recognizer for legacy status bumps missing persisted IDs."""
     text = content or ""
     return any(pattern.match(text) for pattern in _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS)
+
+
+def _coerce_nonnegative_timeout(value: Any, default: int) -> int:
+    """Return a non-negative integer timeout, falling back on bad config."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_discord_exec_approval_view_timeout() -> int:
+    """Timeout for Discord dangerous-command approval buttons.
+
+    Must match tools.approval's gateway wait timeout so buttons do not expire
+    before the blocked agent thread stops waiting, especially when the user
+    configures ``approvals.gateway_timeout`` above the 5-minute default.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        approvals = cfg.get("approvals", {}) or {}
+        return _coerce_nonnegative_timeout(
+            approvals.get("gateway_timeout", 300),
+            300,
+        )
+    except Exception:
+        return 300
+
+
+def _get_discord_clarify_view_timeout() -> int:
+    """Timeout for Discord clarify choice buttons.
+
+    Must match tools.clarify_gateway.wait_for_response's timeout source so
+    multiple-choice prompts remain answerable for the whole interval the agent
+    is waiting.  The backend default is 600s via ``agent.clarify_timeout``.
+    """
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+        return _coerce_nonnegative_timeout(get_clarify_timeout(), 600)
+    except Exception:
+        return 600
 
 
 def _clean_discord_id(entry: str) -> str:
@@ -2681,6 +2748,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         if not self._client:
             return summary
         tree = self._client.tree
+
         app_id = getattr(self._client, "application_id", None) or getattr(getattr(self._client, "user", None), "id", None)
         if not app_id:
             raise RuntimeError("Discord application ID is unavailable for slash command sync")
@@ -4192,10 +4260,23 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         """Build a slash callback rendering ``template`` from its args via ``_run_simple_slash``;
         the introspected signature is synthesised from ``args`` (see ``_NATIVE_SLASH_COMMANDS``)."""
         async def _handler(interaction: discord.Interaction, **kwargs):
-            text = template.format(**kwargs)
-            call_args = (text.strip() if strip else text,) + (() if followup is None else (followup,))
+            # Auto-registered commands template /name {args}; render missing
+            # optional args as empty strings so a bare invocation works.
+            text = template.format_map(_EmptyDefaults(dict(kwargs)))
+            rendered = text.strip() if strip else text
+            # Acknowledgement reflects the INVOKED text (pre-injection);
+            # dispatch carries the context-injected text for sprint shortcuts.
+            ack = followup(name, rendered) if callable(followup) else followup
+            if name in _SPRINT_SHORTCUT_COMMANDS:
+                rendered = await self._inject_sprint_shortcut_context(rendered, interaction)
+            if ack is None:
+                call_args = (rendered,)
+            else:
+                call_args = (rendered, ack)
             await self._run_simple_slash(interaction, *call_args)
         _handler.__name__ = prefix + {"bg": "background"}.get(name, name).replace("-", "_")
+        _handler.__annotations__ = {"interaction": discord.Interaction,
+                                    **{a[0]: a[1] for a in args}, "return": None}
         params = [inspect.Parameter("interaction", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=discord.Interaction)]
         for arg_name, arg_type, default, _desc, _choices in args:
             params.append(inspect.Parameter(
@@ -4235,6 +4316,33 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             tree.command(name=name, description=description)(
                 self._slash_proxy(name, args, template, followup, strip=name != "insights")
             )
+        # Our read-history feature: dedicated handlers for /read + /threadread
+        # (history injection + thread-read flow), not the generic slash proxy.
+        # prompt/name are REQUIRED params (users answer via ✏️ Other otherwise);
+        # auto-register below must not shadow them (already_registered guard).
+        @tree.command(name="read", description="Read Discord history here, then answer your prompt")
+        @discord.app_commands.describe(
+            prompt="Question to answer after reading history",
+            limit="History limit: 20|50|100|200|300|500|1000 (default 200)",
+        )
+        async def slash_read(interaction: discord.Interaction, prompt: str, limit: int = 200):
+            await self._run_read_history_slash(interaction, "read", prompt, limit=limit)
+
+        @tree.command(name="threadread", description="Create a thread, read parent-channel history, then summarize")
+        @discord.app_commands.describe(
+            name="Thread name",
+            prompt="Question to answer after reading history",
+            limit="History limit: 20|50|100|200|300|500|1000 (default 200)",
+            auto_archive_duration="Thread auto-archive minutes",
+        )
+        async def slash_threadread(
+            interaction: discord.Interaction, name: str, prompt: str,
+            limit: int = 200, auto_archive_duration: int = 1440,
+        ):
+            await self._handle_thread_read_slash(
+                interaction, limit=limit, name=name, prompt=prompt,
+                auto_archive_duration=auto_archive_duration,
+            )
         # Auto-register COMMAND_REGISTRY + plugin commands not yet on the tree. Native
         # commands above always survive the 100-command cap; reserve one slot for /skill.
         already_registered: set[str] = set()
@@ -4250,11 +4358,22 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             if len(already_registered) >= slot_cap:
                 dropped_over_cap += 1
                 return
-            args = (("args", str, "", f"Arguments: {args_hint}"[:100], None),) if args_hint else ()
-            template = f"/{name} {{args}}" if args_hint else f"/{name}"
+            hint_key = args_hint.strip().lower().strip("<>[]: ")
+            if hint_key == "prompt":
+                # Mirror /steer: expose a real `prompt` kwarg (incl. annotations)
+                # instead of a generic `args` option.
+                args = (("prompt", str, "", "Prompt text", None),)
+                template = f"/{name} {{prompt}}"
+            else:
+                args = (("args", str, "", f"Arguments: {args_hint}"[:100], None),) if args_hint else ()
+                template = f"/{name} {{args}}" if args_hint else f"/{name}"
+            # Sprint shortcuts + auto_agent keep a visible ephemeral
+            # acknowledgement (rendered from the INVOKED command text, not hint).
+            auto_followup = _followup_for_auto_command if name in _AUTO_ACK_COMMANDS else None
             auto_cmd = discord.app_commands.Command(
                 name=discord_name, description=(description or f"Run /{name}")[:100],
-                callback=self._slash_proxy(name, args, template, None, strip=bool(args_hint), prefix="auto_slash_"),
+                callback=self._slash_proxy(name, args, template, auto_followup,
+                                           strip=bool(args_hint), prefix="auto_slash_"),
             )
             try:
                 tree.add_command(auto_cmd)
@@ -4268,6 +4387,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 already_registered = {cmd.name for cmd in tree.get_commands()}
             except Exception:
                 pass
+            # Our dedicated /read + /threadread handlers above are the real ones;
+            # never let auto-register shadow them with a generic proxy.
+            already_registered.update({"read", "threadread"})
             config_overrides = _resolve_config_gates()
             for cmd_def in COMMAND_REGISTRY:
                 if _is_gateway_available(cmd_def, config_overrides):
@@ -4448,6 +4570,295 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             guild = getattr(getattr(interaction, "channel", None), "guild", None)
             guild_id = getattr(guild, "id", None)
         return str(guild_id) if guild_id else None
+    _READ_HISTORY_LIMITS = {20, 50, 100, 200, 300, 500, 1000}
+    _READ_HISTORY_DEFAULT_LIMIT = 200
+    _READ_HISTORY_DEFAULT_QUESTION = "สรุป context ล่าสุดจากข้อความย้อนหลังด้านบนให้หน่อย"
+    _THREAD_READ_DEFAULT_PROMPT = "สรุป context ล่าสุดจากข้อความย้อนหลังด้านบนเพื่อเริ่ม thread ใหม่นี้ให้หน่อย"
+
+    def _coerce_read_history_limit(self, value: Any) -> Optional[int]:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return None
+        if limit not in self._READ_HISTORY_LIMITS:
+            return None
+        return limit
+
+    def _parse_read_history_command(self, text: str) -> Optional[Tuple[int, str]]:
+        """Parse Discord history commands.
+
+        Supported forms:
+        - ``/read20 question`` / ``/read50`` / ``/read100`` / ``/read200``
+        - ``/read prompt: question`` (defaults to 200)
+        - ``/read limit: 500 prompt: question``
+        - ``/read 500 question``
+        """
+        raw = (text or "").strip()
+        fixed = re.match(r"^/read(20|50|100|200|300|500|1000)(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
+        if fixed:
+            prompt = (fixed.group(2) or "").strip()
+            prompt_match = re.search(r"(?:^|\s)prompt\s*[:=]\s*(.*)$", prompt, re.IGNORECASE | re.DOTALL)
+            if prompt_match:
+                prompt = prompt_match.group(1).strip()
+            return int(fixed.group(1)), prompt
+
+        generic = re.match(r"^/read(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
+        if not generic:
+            return None
+
+        body = (generic.group(1) or "").strip()
+        limit = self._READ_HISTORY_DEFAULT_LIMIT
+        prompt = body
+
+        # Prefer explicit labels so Thai/free-form prompts can contain numbers safely.
+        limit_match = re.search(r"(?:^|\s)(?:limit|count|messages)\s*[:=]\s*(\d+)(?=\s|$)", body, re.IGNORECASE)
+        if limit_match:
+            parsed_limit = self._coerce_read_history_limit(limit_match.group(1))
+            if parsed_limit is None:
+                return None
+            limit = parsed_limit
+            prompt = (body[:limit_match.start()] + " " + body[limit_match.end():]).strip()
+        else:
+            leading_limit = re.match(r"^(20|50|100|200|300|500|1000)(?:\s+(.*))?$", body, re.IGNORECASE | re.DOTALL)
+            if leading_limit:
+                limit = int(leading_limit.group(1))
+                prompt = (leading_limit.group(2) or "").strip()
+
+        prompt_match = re.search(r"(?:^|\s)prompt\s*[:=]\s*(.*)$", prompt, re.IGNORECASE | re.DOTALL)
+        if prompt_match:
+            prompt = prompt_match.group(1).strip()
+        return limit, prompt
+
+    def _parse_thread_read_command(self, text: str) -> Optional[Tuple[int, str, str]]:
+        """Parse text commands like ``/threadread name: \"Plan\" prompt: ...``.
+
+        ``/threadread200`` remains supported as a backwards-compatible alias;
+        ``limit:`` can be used on the unsuffixed command for deeper reads.
+        """
+        raw = (text or "").strip()
+        match = re.match(r"^/threadread(20|50|100|200|300|500|1000)?(?:\s+(.*))?$", raw, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        suffix_limit = match.group(1)
+        body = (match.group(2) or "").strip()
+        limit = int(suffix_limit) if suffix_limit else self._READ_HISTORY_DEFAULT_LIMIT
+
+        limit_match = re.search(r"(?:^|\s)(?:limit|count|messages)\s*[:=]\s*(\d+)(?=\s|$)", body, re.IGNORECASE)
+        if limit_match:
+            parsed_limit = self._coerce_read_history_limit(limit_match.group(1))
+            if parsed_limit is None:
+                return None
+            limit = parsed_limit
+            body = (body[:limit_match.start()] + " " + body[limit_match.end():]).strip()
+
+        name_label = re.search(r"(?:^|\s)name\s*[:=]\s*", body, re.IGNORECASE)
+        if not name_label:
+            return None
+        rest = body[name_label.end():].strip()
+        quoted_name = False
+        if rest.startswith('"'):
+            end = rest.find('"', 1)
+            if end <= 0:
+                return None
+            name = rest[1:end].strip()
+            after_name = rest[end + 1:].strip()
+            quoted_name = True
+        elif rest.startswith("'"):
+            end = rest.find("'", 1)
+            if end <= 0:
+                return None
+            name = rest[1:end].strip()
+            after_name = rest[end + 1:].strip()
+            quoted_name = True
+        else:
+            prompt_label = re.search(r"(?:^|\s)prompt\s*[:=]", rest, re.IGNORECASE)
+            if prompt_label:
+                name = rest[:prompt_label.start()].strip()
+                after_name = rest[prompt_label.start():].strip()
+            else:
+                name = rest.strip()
+                after_name = ""
+        if not name:
+            return None
+
+        prompt = ""
+        prompt_match = re.search(r"(?:^|\s)prompt\s*[:=]\s*(.*)$", after_name, re.IGNORECASE | re.DOTALL)
+        if prompt_match:
+            prompt = prompt_match.group(1).strip()
+        elif suffix_limit and quoted_name:
+            # Back-compat: /threadread200 name: "Thread" summarize this.
+            prompt = after_name.strip()
+        return limit, name, prompt
+
+    def _format_history_message(self, msg: Any, *, include_bots: bool = False) -> Optional[str]:
+        """Format one Discord history message for ephemeral prompt injection."""
+        author = getattr(msg, "author", None)
+        if getattr(author, "bot", False) and not include_bots:
+            return None
+        msg_type = getattr(msg, "type", None)
+        type_name = str(getattr(msg_type, "name", msg_type or "default")).lower()
+        if type_name not in ("default", "reply", "none"):
+            return None
+
+        content = (
+            getattr(msg, "clean_content", None)
+            or getattr(msg, "content", None)
+            or ""
+        ).strip()
+        attachments = getattr(msg, "attachments", None) or []
+        if attachments:
+            names = []
+            for att in attachments:
+                name = getattr(att, "filename", None) or getattr(att, "url", None) or "attachment"
+                names.append(str(name))
+            attachment_text = ", ".join(names[:5])
+            content = f"{content} [attachments: {attachment_text}]".strip()
+        if not content:
+            return None
+
+        display_name = (
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or "unknown"
+        )
+        created = getattr(msg, "created_at", None)
+        timestamp = ""
+        if created is not None:
+            try:
+                timestamp = created.strftime("%Y-%m-%d %H:%M") + " "
+            except Exception:
+                timestamp = ""
+        return f"- {timestamp}{display_name}: {content}"
+
+    async def _inject_read_history_context(
+        self,
+        text: str,
+        *,
+        channel: Any,
+        before: Any = None,
+        anchor: Any = None,
+        include_bots: bool = False,
+    ) -> str:
+        """Replace ``/readXX``/``/read`` with recent Discord channel/thread context."""
+        parsed = self._parse_read_history_command(text)
+        if not parsed:
+            return text
+        limit, question = parsed
+        question = question or self._READ_HISTORY_DEFAULT_QUESTION
+
+        channel_name = getattr(channel, "name", None) or str(getattr(channel, "id", "current channel"))
+        header_name = f"#{channel_name}" if channel_name and not str(channel_name).startswith("#") else str(channel_name)
+
+        lines: List[str] = []
+        skipped = 0
+        anchor_line = self._format_history_message(anchor, include_bots=include_bots) if anchor is not None else None
+        history_limit = max(limit - 1, 0) if anchor_line else limit + 1
+        history_kwargs = {"limit": history_limit}
+        if anchor is not None:
+            history_kwargs["before"] = anchor
+        elif before is not None:
+            history_kwargs["before"] = before
+        try:
+            async for msg in channel.history(**history_kwargs):
+                formatted = self._format_history_message(msg, include_bots=include_bots)
+                if formatted:
+                    lines.append(formatted)
+                else:
+                    skipped += 1
+                if len(lines) >= history_limit:
+                    break
+        except Exception as exc:
+            logger.warning("[%s] Failed to read Discord history: %s", self.name, exc, exc_info=True)
+            return (
+                f"I tried to read the last {limit} Discord messages from {header_name}, "
+                f"but Discord history fetch failed: {exc}\n\n"
+                f"User question:\n{question}"
+            )
+
+        if anchor_line:
+            lines_block = list(reversed(lines))
+            lines_block.append(anchor_line)
+            history_block = "\n".join(lines_block) if lines_block else anchor_line
+            header = f"[Discord history: last {limit} messages up to replied message from {header_name}]"
+        elif not lines:
+            history_block = "(No readable non-bot text messages found in the requested Discord history window.)"
+            header = f"[Discord history: last {limit} messages from {header_name}]"
+        else:
+            # Discord returns newest-first; present oldest-first for natural reading.
+            history_block = "\n".join(reversed(lines))
+            header = f"[Discord history: last {limit} messages from {header_name}]"
+
+        skipped_note = ""
+        if skipped:
+            noun = "message" if skipped == 1 else "messages"
+            skipped_note = f"\n\n[Skipped {skipped} bot/system {noun}.]"
+
+        return (
+            f"{header}\n"
+            f"{history_block}"
+            f"{skipped_note}\n\n"
+            f"User question:\n{question}"
+        )
+
+    async def _inject_sprint_shortcut_context(self, command_text: str, interaction: discord.Interaction) -> str:
+        """Attach a small Discord backscroll to context-free sprint shortcuts.
+
+        Native Discord slash commands do not carry the visible surrounding
+        message or the replied-to message content into Hermes' normal session
+        history.  For `/plan_sprint` with no goal, include recent channel
+        context (including Hermes/bot replies) so the coordinator can turn the
+        immediately preceding recommendation into a sprint plan instead of
+        asking the user to repeat it.
+        """
+        if command_text.strip() != "/plan_sprint":
+            return command_text
+        question = (
+            "Use the recent Discord context below as the goal/context for /plan_sprint. "
+            "Prefer the user's most recent concrete request and Hermes' immediately preceding recommendation. "
+            "Create a sprint-gated plan from that context; only ask a follow-up if the backscroll is still ambiguous."
+        )
+        injected = await self._inject_read_history_context(
+            f"/read20 {question}",
+            channel=interaction.channel,
+            before=None,
+            include_bots=True,
+        )
+        return f"/plan_sprint {injected}"
+
+    async def _run_read_history_slash(
+        self,
+        interaction: discord.Interaction,
+        command_name: str,
+        question: str = "",
+        *,
+        limit: Optional[int] = None,
+    ) -> None:
+        """Handle native Discord /readXX and /read commands with channel.history access."""
+        if command_name.lower() == "read":
+            effective_limit = self._coerce_read_history_limit(limit or self._READ_HISTORY_DEFAULT_LIMIT)
+            if effective_limit is None:
+                effective_limit = self._READ_HISTORY_DEFAULT_LIMIT
+            command_text = f"/read{effective_limit} {question}".strip()
+        else:
+            effective_limit = self._coerce_read_history_limit(command_name[4:]) or self._READ_HISTORY_DEFAULT_LIMIT
+            command_text = f"/{command_name} {question}".strip()
+        if not await self._check_slash_authorization(interaction, command_text):
+            return
+        await interaction.response.defer(ephemeral=True)
+        injected = await self._inject_read_history_context(
+            command_text,
+            channel=interaction.channel,
+            before=None,
+        )
+        event = self._build_slash_event(interaction, injected)
+        event.message_type = MessageType.TEXT
+        await self.handle_message(event)
+        try:
+            await interaction.edit_original_response(
+                content=f"Read {effective_limit} Discord message(s) and sent to Hermes~"
+            )
+        except Exception as e:
+            logger.debug("Discord read-history slash acknowledgement failed: %s", e)
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
@@ -4519,6 +4930,153 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         starter = (message or "").strip()
         if starter and thread_id:
             await self._dispatch_thread_session(interaction, thread_id, thread_name, starter)
+
+    async def _handle_thread_read_slash(
+        self,
+        interaction: discord.Interaction,
+        *,
+        limit: int,
+        name: str,
+        prompt: str = "",
+        auto_archive_duration: int = 1440,
+    ) -> None:
+        """Create a thread, inject parent-channel history, and start a session there."""
+        command_text = f"/threadread{limit} name: {name}".strip()
+        if not await self._check_slash_authorization(interaction, command_text):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        if limit not in self._READ_HISTORY_LIMITS:
+            await interaction.followup.send(
+                f"Failed to create thread: unsupported history limit {limit}.",
+                ephemeral=True,
+            )
+            return
+
+        result = await self._create_thread(
+            interaction,
+            name=name,
+            message="",
+            auto_archive_duration=auto_archive_duration,
+        )
+        if not result.get("success"):
+            error = result.get("error", "unknown error")
+            await interaction.followup.send(f"Failed to create thread: {error}", ephemeral=True)
+            return
+
+        thread_id = result.get("thread_id")
+        thread_name = result.get("thread_name") or name
+        link = f"<#{thread_id}>" if thread_id else f"**{thread_name}**"
+        await interaction.edit_original_response(
+            content=f"Created thread {link} and queued a /read{limit} summary from this channel."
+        )
+
+        if not thread_id:
+            return
+        self._threads.mark(thread_id)
+        await self._send_threadread_parent_ack(
+            getattr(interaction, "channel", None),
+            thread_id=thread_id,
+            thread_name=thread_name,
+            limit=limit,
+        )
+
+        question = (prompt or "").strip() or self._THREAD_READ_DEFAULT_PROMPT
+        injected = await self._inject_read_history_context(
+            f"/read{limit} {question}",
+            channel=interaction.channel,
+            before=None,
+        )
+        await self._dispatch_thread_session(interaction, thread_id, thread_name, injected)
+
+    async def _handle_thread_read_message(
+        self,
+        message: DiscordMessage,
+        *,
+        limit: int,
+        name: str,
+        prompt: str = "",
+        auto_archive_duration: int = 1440,
+        anchor: Any = None,
+    ) -> bool:
+        """Text-message fallback for ``/threadread200 name: \"...\"``.
+
+        Native slash commands are preferable, but this keeps the workflow usable
+        when Discord command sync is intentionally disabled or cached.
+        """
+        interaction_like = SimpleNamespace(
+            channel=message.channel,
+            channel_id=getattr(getattr(message, "channel", None), "id", None),
+            user=getattr(message, "author", None),
+            guild=getattr(message, "guild", None),
+        )
+        result = await self._create_thread(
+            interaction_like,
+            name=name,
+            message="",
+            auto_archive_duration=auto_archive_duration,
+        )
+        if not result.get("success"):
+            error = result.get("error", "unknown error")
+            try:
+                await message.channel.send(f"Failed to create thread: {error}")
+            except Exception:
+                logger.warning("[%s] Failed to report /threadread error: %s", self.name, error)
+            return False
+
+        thread_id = result.get("thread_id")
+        thread_name = result.get("thread_name") or name
+        if not thread_id:
+            return False
+        self._threads.mark(thread_id)
+        await self._send_threadread_parent_ack(
+            getattr(message, "channel", None),
+            thread_id=thread_id,
+            thread_name=thread_name,
+            limit=limit,
+        )
+
+        question = (prompt or "").strip() or self._THREAD_READ_DEFAULT_PROMPT
+        injected = await self._inject_read_history_context(
+            f"/read{limit} {question}",
+            channel=message.channel,
+            before=message,
+            anchor=anchor,
+        )
+        await self._dispatch_thread_session(interaction_like, thread_id, thread_name, injected)
+        return True
+
+    async def _send_threadread_parent_ack(
+        self,
+        channel: Any,
+        *,
+        thread_id: str,
+        thread_name: str,
+        limit: int,
+    ) -> None:
+        """Send a persistent parent-channel breadcrumb for /threadread.
+
+        Native slash acknowledgements are ephemeral and easy to lose after the
+        user navigates away.  Public threads created via ``create_thread()`` can
+        also appear only in Discord's Threads panel, with no parent message
+        anchor.  Post a small visible breadcrumb in the parent channel so the
+        new thread is discoverable later.
+        """
+        parent_channel = self._thread_parent_channel(channel)
+        if parent_channel is None or not hasattr(parent_channel, "send"):
+            return
+        link = f"<#{thread_id}>" if thread_id else f"**{thread_name}**"
+        try:
+            await parent_channel.send(
+                f"🧵 Created thread {link} and seeded it with /read{limit} context from this channel."
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to send /threadread parent acknowledgement for thread %s: %s",
+                self.name,
+                thread_id,
+                exc,
+            )
 
     async def _dispatch_thread_session(
         self, interaction: discord.Interaction, thread_id: str, thread_name: str, text: str,
@@ -4830,7 +5388,16 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 """Format ``[name] content`` or None to skip; shared filter for both scans.
                 Does NOT enforce the self-message partition — callers decide where to stop."""
                 nonlocal has_unverified
-                if msg.type not in {discord.MessageType.default, discord.MessageType.reply}:
+                msg_type = getattr(msg, "type", None)
+                msg_type_name = str(getattr(msg_type, "name", "")).lower()
+                discord_message_type = getattr(discord, "MessageType", None)
+                default_type = getattr(discord_message_type, "default", object())
+                reply_type = getattr(discord_message_type, "reply", object())
+                if (
+                    msg_type != default_type
+                    and msg_type != reply_type
+                    and msg_type_name not in {"default", "reply"}
+                ):
                     return None
                 content = getattr(msg, "clean_content", msg.content) or ""
                 if (
@@ -5282,6 +5849,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids, require_admin=require_admin,
                 admin_user_ids=admin_user_ids, allow_permanent="always" in choices,
                 allow_session="session" in choices, smart_denied=prompt.smart_denied,
+                timeout_seconds=_get_discord_exec_approval_view_timeout(),
             )
             send_kwargs: Dict[str, Any] = {"content": content, "embed": embed, "view": view}
             if mention_content:
@@ -5348,6 +5916,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                     choices=clean_choices, clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    timeout_seconds=_get_discord_clarify_view_timeout(),
                 )
             else:
                 hint = "Reply in this channel with your answer."
@@ -5659,6 +6228,25 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             with suppress(ValueError, TypeError):
                 return _Snowflake(int(_ref_mid))
         return None
+    async def _resolve_replied_message(self, message: DiscordMessage) -> Optional[Any]:
+        """Return the Discord message being replied to, fetching it when needed."""
+        reference = getattr(message, "reference", None)
+        if not reference:
+            return None
+        resolved = getattr(reference, "resolved", None)
+        if resolved is not None:
+            return resolved
+        message_id = getattr(reference, "message_id", None)
+        channel = getattr(message, "channel", None)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if message_id is None or not callable(fetch_message):
+            return None
+        try:
+            return await fetch_message(message_id)
+        except Exception as exc:
+            logger.debug("[%s] Failed to fetch replied Discord message %s: %s", self.name, message_id, exc)
+            return None
+
 
     async def _handle_message(
         self, message: DiscordMessage, role_authorized: bool = False, *, recovered: bool = False,
@@ -5729,14 +6317,38 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             if require_mention and not is_free_channel and not in_bot_thread:
                 if not self._self_is_explicitly_mentioned(message) and not mention_prefix:
                     return False
-        # Auto-thread: isolate each @mention in a text channel into its own thread (Slack-style).
+
+        reply_anchor = await self._resolve_replied_message(message)
+
+        thread_read_request = self._parse_thread_read_command(normalized_content)
+        if thread_read_request and not is_thread and not isinstance(message.channel, discord.DMChannel):
+            limit, thread_name, thread_prompt = thread_read_request
+            await self._handle_thread_read_message(
+                message,
+                limit=limit,
+                name=thread_name,
+                prompt=thread_prompt,
+                anchor=reply_anchor,
+            )
+            return True
+        # Auto-thread: when enabled, automatically create a thread for every
+        # @mention in a text channel so each conversation is isolated (like Slack).
+        # Messages already inside threads or DMs are unaffected.
+        # no_thread_channels: channels where bot responds directly without thread.
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels = self._get_no_thread_channels()
             skip_thread = bool(channel_keys & no_thread_channels) or is_free_channel
             auto_thread = self._extra_or_env_flag("auto_thread", "DISCORD_AUTO_THREAD", "true", truthy=True)
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
-            if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
+            is_read_history_command = self._parse_read_history_command(normalized_content) is not None
+            if (
+                auto_thread
+                and not skip_thread
+                and not is_voice_linked_channel
+                and not is_reply_message
+                and not is_read_history_command
+            ):
                 thread = await self._auto_create_thread(message)
                 if thread:
                     parent_channel_id = str(message.channel.id)
@@ -5814,15 +6426,33 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         event_text = normalized_content
         if pending_text_injection:
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
+
+        # /read commands perform their own explicit history injection below;
+        # skip the generic reply/backfill scan so tests and runtime issue only
+        # the requested anchored history query.
+        read_history_requested = self._parse_read_history_command(normalized_content) is not None
+
         # ── History backfill ─────────────────────────────────────────
         # With require_mention, messages between bot turns never reach the transcript; fetch
         # history after the bot's last message (cold start: last N, stop at first self-message)
         # and prepend it. DMs skipped (every DM triggers the bot); in-flight arrivals not captured.
         _channel_context = None
         _is_dm = isinstance(message.channel, discord.DMChannel)
-        if not _is_dm and self._discord_history_backfill():
-            # Backfill on a gap: mention-gated channels, any thread (processing/restart gaps), any
-            # reply (hydrate context around the referenced message). DMs/fresh auto-threads: nothing.
+        if not _is_dm and self._discord_history_backfill() and not read_history_requested:
+            # Run backfill when there's a real gap to fill:
+            #   - mention-gated channels with no free-response override
+            #     (messages between bot turns aren't in the transcript)
+            #   - any thread (in_bot_thread bypasses the mention check, but
+            #     processing-window gaps and post-restart context still need
+            #     recovery)
+            #   - any reply (the user pointed at a specific message; hydrate
+            #     the context around it even in a free-response channel where
+            #     no mention gap exists — otherwise replies get only the short
+            #     "[Replying to: ...]" snippet with no surrounding context)
+            # DMs skip entirely because every DM message triggers the bot,
+            # so the session transcript already has everything.
+            # Auto-threaded messages also skip — we just created the thread,
+            # there's nothing prior to backfill.
             _has_mention_gap = require_mention and not is_free_channel and not in_bot_thread
             _is_reply = message.reference is not None
             if (_has_mention_gap or is_thread or _is_reply) and auto_threaded_channel is None:
@@ -5832,7 +6462,24 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 )
                 if _backfill_text:
                     _channel_context = _backfill_text
-        # Keep empty user messages out of the session; with channel_context a bare mention = "catch me up".
+
+        if read_history_requested and not pending_text_injection:
+            # Text-message form (not native Discord slash interaction): rewrite
+            # /readXX into an ordinary agent prompt with current channel/thread
+            # history injected only for this turn.
+            event_text = await self._inject_read_history_context(
+                normalized_content,
+                channel=message.channel,
+                before=message,
+                anchor=reply_anchor,
+            )
+            msg_type = MessageType.TEXT
+            _channel_context = None
+
+        # Defense-in-depth: prevent empty user messages from entering session
+        # (can happen when user sends @mention-only with no other text).
+        # When channel_context is present, a bare mention means "catch me up"
+        # — the context IS the message, so skip the placeholder.
         if (not event_text or not event_text.strip()) and not _channel_context:
             # Bare mention-only ping with no media/text/backfill: drop rather than spawn an empty turn.
             if (mention_prefix and not media_urls and not pending_text_injection):
@@ -5852,8 +6499,8 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         reply_to_text = None
         if message.reference:
             reply_to_id = str(message.reference.message_id)
-            if message.reference.resolved:
-                reply_to_text = getattr(message.reference.resolved, "content", None) or None
+            if reply_anchor is not None:
+                reply_to_text = getattr(reply_anchor, "content", None) or None
         event = MessageEvent(
             text=event_text, message_type=msg_type, source=source, raw_message=message,
             message_id=str(message.id), media_urls=media_urls, media_types=media_types,
@@ -6027,8 +6674,16 @@ def _define_discord_view_classes() -> None:
             self, session_key: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None,
             require_admin: bool = False, admin_user_ids: Optional[set] = None,
             allow_permanent: bool = True, allow_session: bool = True, smart_denied: bool = False,
+            timeout_seconds: Optional[int] = None,
         ):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
+            super().__init__(
+                allowed_user_ids, allowed_role_ids,
+                timeout=(
+                    _get_discord_exec_approval_view_timeout()
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
+            )
             self.session_key = session_key
             self.require_admin = require_admin
             self.admin_user_ids = {str(a).strip() for a in (admin_user_ids or set()) if str(a).strip()}
@@ -6411,8 +7066,22 @@ def _define_discord_view_classes() -> None:
         gateway clarify entry immediately; ``Other`` flips to text-capture (next message answers).
         Single-use: after the first valid click all buttons disable."""
 
-        def __init__(self, choices: List[str], clarify_id: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None):
-            super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
+        def __init__(
+            self,
+            choices: List[str],
+            clarify_id: str,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+            timeout_seconds: Optional[int] = None,
+        ):
+            super().__init__(
+                allowed_user_ids, allowed_role_ids,
+                timeout=(
+                    _get_discord_clarify_view_timeout()
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
+            )
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             for index, choice in enumerate(self.choices):
@@ -6482,8 +7151,9 @@ def _define_discord_view_classes() -> None:
             ):
                 return
             display_name = getattr(getattr(interaction, "user", None), "display_name", "user")
-            await self._finish(interaction, discord.Color.green(), f"Answered by {display_name}: {choice}", log_edit_failure=True)
-            # Round-trip the canonical choice text from the entry, not the button label.
+            # Resolve via the gateway clarify primitive BEFORE editing the message.
+            # If the entry has already timed out or been cancelled, the prompt must
+            # not be marked answered in Discord — the stale-entry reply below covers it.
             resolved_text: Optional[str] = None
             try:
                 from tools.clarify_gateway import _entries as _clarify_entries  # type: ignore
@@ -6503,7 +7173,43 @@ def _define_discord_view_classes() -> None:
                     getattr(getattr(interaction, "user", None), "display_name", "?"), resolved,
                 )
             except Exception as exc:
-                logger.error("Discord clarify resolve_gateway_clarify failed (id=%s): %s", self.clarify_id, exc)
+                logger.error(
+                    "Discord clarify resolve_gateway_clarify failed (id=%s): %s",
+                    self.clarify_id, exc,
+                )
+                resolved = False
+
+            if not resolved:
+                await interaction.response.send_message(
+                    "This prompt has expired or was cancelled~", ephemeral=True,
+                )
+                return
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+
+            embed = interaction.message.embeds[0] if (
+                interaction.message and interaction.message.embeds
+            ) else None
+            if embed:
+                user = getattr(interaction, "user", None)
+                display_name = getattr(user, "display_name", "user")
+                embed.color = discord.Color.green()
+                embed.set_footer(text=f"Answered by {display_name}: {choice}")
+
+            try:
+                await interaction.response.edit_message(embed=embed, view=self)
+            except Exception:
+                logger.debug(
+                    "Discord clarify edit_message failed for %s",
+                    self.clarify_id,
+                    exc_info=True,
+                )
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
 
         async def _on_other(self, interaction: "discord.Interaction") -> None:
             """Flip the clarify entry into text-capture mode."""

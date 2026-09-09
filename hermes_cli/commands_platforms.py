@@ -382,7 +382,16 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 # parity test reads this set. Aliases are never pinned ahead of canonicals.
 _SLACK_VIA_HERMES_ONLY = frozenset({
     "topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat",
-    "refine", "review", "pause", "whoami", "platform", "insights", "login"})
+    "refine", "review", "pause", "whoami", "platform", "insights", "login",
+    # Our registry carries commands/usage/restart for Telegram parity; upstream's
+    # decomposition dropped them from this set — restore so the parity test holds.
+    # "help" stays OUT: _SLACK_PRIORITY_COMMANDS pins /help as a native slash on every surface.
+    "commands", "restart", "usage",
+    "reload-skills", "reload_skills"})
+
+# Discord-only history commands (our read-history restore): no Slack surface. The Slack
+# manifest must not advertise them, and /hermes must not map them.
+_SLACK_EXCLUDED_COMMANDS = frozenset({"read", "threadread"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -407,6 +416,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     for name, desc, hint in wanted:
         slack_name = _sanitize_slack_name(name)
         if (not slack_name or slack_name in seen or slack_name in _SLACK_RESERVED_COMMANDS
+                or slack_name in _SLACK_EXCLUDED_COMMANDS
                 or slack_name in _SLACK_VIA_HERMES_ONLY
                 or len(entries) >= _SLACK_MAX_SLASH_COMMANDS):
             continue
@@ -434,7 +444,9 @@ def slack_subcommand_map() -> dict[str, str]:
     """name/alias -> "/command" for the Slack ``/hermes`` handler, plugin commands included."""
     mapping: dict[str, str] = {
         name: f"/{name}"
-        for cmd in _gateway_available_commands() for name in (cmd.name, *cmd.aliases)}
+        for cmd in _gateway_available_commands()
+        if _sanitize_slack_name(cmd.name) not in _SLACK_EXCLUDED_COMMANDS
+        for name in (cmd.name, *cmd.aliases)}
     for name, _description, _args_hint in _iter_plugin_command_entries():
         mapping.setdefault(name, f"/{name}")
     return mapping

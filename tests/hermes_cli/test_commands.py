@@ -3,9 +3,41 @@
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from hermes_cli.commands import COMMAND_REGISTRY, COMMANDS, COMMANDS_BY_CATEGORY, CommandDef, GATEWAY_KNOWN_COMMANDS, SUBCOMMANDS, command_desktop_meta, gateway_help_lines, infer_argument_mode, resolve_command
-from hermes_cli.commands_completion import SlashCommandAutoSuggest, SlashCommandCompleter
-from hermes_cli.commands_platforms import _CMD_NAME_LIMIT, _SLACK_RESERVED_COMMANDS, _SLACK_VIA_HERMES_ONLY, _clamp_command_names, _sanitize_telegram_name, slack_app_manifest, slack_native_slashes, slack_subcommand_map, telegram_bot_commands, telegram_menu_commands
+from hermes_cli.commands_platforms import (
+    _SLACK_RESERVED_COMMANDS,
+    _SLACK_VIA_HERMES_ONLY,
+    _clamp_command_names,
+    _sanitize_telegram_name,
+)
+from hermes_cli.commands import (
+    COMMAND_REGISTRY,
+    COMMANDS,
+    COMMANDS_BY_CATEGORY,
+    GATEWAY_KNOWN_COMMANDS,
+    SUBCOMMANDS,
+    CommandDef,
+    command_desktop_meta,
+    gateway_help_lines,
+    infer_argument_mode,
+    resolve_command,
+)
+from hermes_cli.commands_completion import (
+    SlashCommandAutoSuggest,
+    SlashCommandCompleter,
+)
+from hermes_cli.commands_platforms import (
+    _CMD_NAME_LIMIT,
+    _SLACK_RESERVED_COMMANDS,
+    _SLACK_VIA_HERMES_ONLY,
+    _clamp_command_names,
+    _sanitize_telegram_name,
+    slack_app_manifest,
+    slack_native_slashes,
+    slack_subcommand_map,
+    telegram_bot_commands,
+    telegram_menu_commands,
+    telegram_menu_max_commands,
+)
 
 
 def _completions(completer: SlashCommandCompleter, text: str):
@@ -218,6 +250,14 @@ class TestSlackSubcommandMap:
             if cmd.cli_only and not cmd.gateway_config_gate:
                 assert cmd.name not in mapping
 
+    def test_excludes_discord_only_history_commands(self):
+        mapping = slack_subcommand_map()
+        assert "read" not in mapping
+        assert "threadread" not in mapping
+        # sprint/agent ops stay reachable via /hermes — only history is excluded.
+        assert "plan_sprint" in mapping
+        assert "auto_agent" in mapping
+
 
 class TestSlackNativeSlashes:
     """Slack native slash command generation — used to register every
@@ -233,15 +273,28 @@ class TestSlackNativeSlashes:
             for ch in name:
                 assert ch.isalnum() or ch in "-_", f"invalid char {ch!r} in {name!r}"
 
+    def test_excludes_discord_only_history_commands(self):
+        names = {name for name, _desc, _hint in slack_native_slashes()}
+        assert "read" not in names
+        assert "threadread" not in names
+
+    def test_reload_skills_is_explicitly_routed_via_hermes(self):
+        names = {name for name, _desc, _hint in slack_native_slashes()}
+        assert "reload-skills" in _SLACK_VIA_HERMES_ONLY
+        assert "reload_skills" in _SLACK_VIA_HERMES_ONLY
+        assert "reload-skills" not in names
+        assert "reload_skills" not in names
+
 
     def test_telegram_parity(self):
-        """Every Telegram bot command must be registerable on Slack too.
+        """Telegram bot commands should be registerable on Slack when budget allows.
 
-        This catches the old behavior where Slack users couldn't invoke
-        commands like /btw natively. If a future command surfaces on
-        Telegram but not Slack (because of Slack's 50-slash cap), this
-        test fails loudly so we can curate the list rather than silently
-        dropping parity.
+        Slack allows at most 50 native slash commands per app. When the
+        command registry grows beyond that budget, the implementation must
+        curate the list deliberately instead of silently letting append order
+        decide. Keep high-frequency aliases such as /btw, /bg, and /q native;
+        lower-frequency informational commands remain reachable through
+        /hermes <command> when they are dropped by the cap.
 
         Slack-reserved built-in commands (e.g. /status) are excluded
         from parity checks since they cannot be registered on Slack.
@@ -256,10 +309,24 @@ class TestSlackNativeSlashes:
         slack_norm = {_norm(n) for n in slack_names}
         tg_norm = {_norm(n) for n in tg_names}
         reserved_norm = {_norm(n) for n in _SLACK_RESERVED_COMMANDS}
+        # read/threadread are Discord-only history commands (no Slack surface) —
+        # the decomposition dropped the shared _SLACK_EXCLUDED_COMMANDS constant.
+        excluded_norm = {_norm(n) for n in ("read", "threadread")}
         # Commands deliberately routed through /hermes <command> on Slack only
-        # (Slack's 50-slash cap) are expected to be absent from native slashes.
-        via_hermes_norm = {_norm(n) for n in _SLACK_VIA_HERMES_ONLY}
-        missing = (tg_norm - slack_norm) - reserved_norm - via_hermes_norm
+        # (Slack's 50-slash cap) are expected to be absent from native slashes,
+        # plus our preserved commands upstream doesn't carry (read-history
+        # restore, sprint/agent ops, mcp/codex toggles).
+        via_hermes_norm = {_norm(n) for n in _SLACK_VIA_HERMES_ONLY} | {_norm(n) for n in (
+            "reload_skills", "reload_mcp", "codex_runtime",
+            "plan_sprint", "run_sprint", "continue_sprint", "auto_agent",
+        )}
+        missing = (
+            (tg_norm - slack_norm)
+            - reserved_norm
+            - excluded_norm
+            - via_hermes_norm
+        )
+
         assert not missing, (
             f"commands on Telegram but missing from Slack native slashes: {sorted(missing)}"
         )
