@@ -70,6 +70,9 @@ WATCH_STRIKE_LIMIT = 3
 # delivered this many matches over its whole life we disable it and fall back to notify_on_complete, same as
 # the strike-limit path.
 WATCH_LIFETIME_MAX_HITS = 8
+# Stale watch events are readiness hints, not durable prompts: drop them when older
+# than this so they can't wake an old session with stale context.
+WATCH_NOTIFICATION_MAX_AGE_SECONDS = 600
 # Global circuit breaker across all sessions so concurrent siblings can't collectively
 # flood the user even when each is under its own cap.
 WATCH_GLOBAL_MAX_PER_WINDOW = 15
@@ -1550,6 +1553,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         # delegation.surface_child_process_notifications, read at most once per drain
         # and only when an sa- event shows up.
         surface_child: "bool | None" = None
+        now = time.time()
         while not self.completion_queue.empty():
             try:
                 evt = self.completion_queue.get_nowait()
@@ -1581,6 +1585,19 @@ class ProcessRegistry(ProcessCheckpointMixin):
                         "(delegation.surface_child_process_notifications=false): "
                         "type=%s session_id=%s task_id=%s",
                         evt.get("type", "completion"), _evt_sid, _evt_task_id)
+                    continue
+            if evt.get("type") in {"watch_match", "watch_disabled"}:
+                try:
+                    created_at = float(evt.get("created_at", 0) or 0)
+                except (TypeError, ValueError):
+                    created_at = 0.0
+                if created_at and now - created_at > WATCH_NOTIFICATION_MAX_AGE_SECONDS:
+                    logger.info(
+                        "Dropping stale %s notification for process %s (age=%.1fs)",
+                        evt.get("type"),
+                        _evt_sid or "unknown",
+                        now - created_at,
+                    )
                     continue
             if text := format_process_notification(evt):
                 results.append((evt, text))
