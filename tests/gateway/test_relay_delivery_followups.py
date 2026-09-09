@@ -394,12 +394,13 @@ def test_durable_dispatch_persists_and_recovers_scope_id(tmp_path, monkeypatch):
         chat_type="group",
         user_id="U9",
         scope_id="G777",
-        session_key="agent:main:discord:group:C123:U9",
+        session_key="agent:worker:discord:group:C123:U9",
+        profile="worker",
     )
     try:
         record = {
             "delegation_id": "d-scope-1",
-            "session_key": "agent:main:discord:group:C123:U9",
+            "session_key": "agent:worker:discord:group:C123:U9",
             "origin_ui_session_id": "",
             "origin_session_id": "",
             "parent_session_id": "sess-p",
@@ -410,6 +411,7 @@ def test_durable_dispatch_persists_and_recovers_scope_id(tmp_path, monkeypatch):
         assert record.get("scope_id") == "G777", (
             "dispatch-time capture must snapshot HERMES_SESSION_SCOPE_ID"
         )
+        assert record.get("origin_profile") == "worker"
         ad._persist_dispatch(record)
     finally:
         clear_session_vars(tokens)
@@ -432,6 +434,7 @@ def test_durable_dispatch_persists_and_recovers_scope_id(tmp_path, monkeypatch):
         "relay egress would be declined by the connector's tenant guard"
     )
     assert evt.get("user_id") == "U9"
+    assert evt.get("origin_profile") == "worker"
 
     # The gateway-side fallback reconstruction must carry it into the source.
     runner = _fallback_runner()
@@ -439,6 +442,7 @@ def test_durable_dispatch_persists_and_recovers_scope_id(tmp_path, monkeypatch):
     assert source is not None
     assert source.scope_id == "G777"
     assert source.user_id == "U9"
+    assert source.profile == "worker"
 
 
 def test_live_completion_event_carries_scope_id(tmp_path, monkeypatch):
@@ -452,6 +456,7 @@ def test_live_completion_event_carries_scope_id(tmp_path, monkeypatch):
         "session_key": "agent:main:discord:group:C123:U9",
         "scope_id": "G777",
         "user_id": "U9",
+        "origin_profile": "worker",
         "goal": "g",
         "dispatched_at": 100.0,
         "completed_at": 101.0,
@@ -473,3 +478,4 @@ def test_live_completion_event_carries_scope_id(tmp_path, monkeypatch):
     ad._push_completion_event(record, {"summary": "ok"}, "completed")
     assert captured.get("scope_id") == "G777"
     assert captured.get("user_id") == "U9"
+    assert captured.get("origin_profile") == "worker"

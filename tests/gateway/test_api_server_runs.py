@@ -77,9 +77,26 @@ def _claim_run(adapter: APIServerAdapter, run_id: str) -> None:
     adapter._run_owners[run_id] = adapter._run_idempotency_scope(request)
 
 
-def _create_runs_app(adapter: APIServerAdapter) -> web.Application:
+def _create_runs_app(
+    adapter: APIServerAdapter,
+    *,
+    request_profile: str | None = None,
+) -> web.Application:
     """Create an aiohttp app with /v1/runs routes registered."""
-    mws = [mw for mw in (cors_middleware, security_headers_middleware) if mw is not None]
+    mws = []
+    if request_profile is not None:
+        @web.middleware
+        async def bind_request_profile(request, handler):
+            token = _api_request_profile.set(request_profile)
+            try:
+                return await handler(request)
+            finally:
+                _api_request_profile.reset(token)
+
+        mws.append(bind_request_profile)
+    mws.extend(
+        mw for mw in (cors_middleware, security_headers_middleware) if mw is not None
+    )
     app = web.Application(middlewares=mws)
     app["api_server_adapter"] = adapter
     app.router.add_post("/v1/runs", adapter._handle_runs)
@@ -211,17 +228,28 @@ class TestStartRun:
         delegation dispatch reads HERMES_SESSION_CHAT_ID to pick its wake
         self-post target, and an empty binding forces background delegations
         on this route back to synchronous execution."""
-        app = _create_runs_app(adapter)
+        app = _create_runs_app(adapter, request_profile="worker")
         captured = {}
 
         async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_create_agent") as mock_create:
+            with (
+                patch.object(adapter, "_check_auth", return_value=None),
+                patch.object(adapter, "_create_agent") as mock_create,
+            ):
                 mock_agent = MagicMock()
 
                 def _capture_run(user_message=None, conversation_history=None, task_id=None):
-                    from tools.async_delegation import _current_origin_session_id
+                    from gateway.session_context import get_session_env
+                    from tools.async_delegation import (
+                        _capture_routing_origin,
+                        _current_origin_session_id,
+                    )
 
                     captured["origin_session_id"] = _current_origin_session_id()
+                    captured["context_profile"] = get_session_env(
+                        "HERMES_SESSION_PROFILE"
+                    )
+                    captured.update(_capture_routing_origin())
                     return {"final_response": "done"}
 
                 mock_agent.run_conversation.side_effect = _capture_run
@@ -248,6 +276,8 @@ class TestStartRun:
         assert captured.get("origin_session_id") == "runs-raw-sid", (
             "runs route must bind chat_id so delegation dispatch sees a wake target"
         )
+        assert captured.get("context_profile") == "worker"
+        assert captured.get("origin_profile") == "worker"
 
     @staticmethod
     async def _wait_completed(cli, run_id: str) -> None:

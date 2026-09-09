@@ -1048,7 +1048,8 @@ class GatewayNotificationsMixin:
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
             raw_sid = _raw_process_event_session_id(evt)
             if raw_sid:
-                adapter = self.adapters.get(Platform.API_SERVER)
+                profile = str(evt.get("profile") or evt.get("origin_profile") or "").strip() or None
+                adapter = self._authorization_adapter(Platform.API_SERVER, profile)
                 if adapter is not None and not adapter_supports_push(adapter):
                     return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
                 logger.debug(
@@ -1657,7 +1658,15 @@ class GatewayNotificationsMixin:
 
     async def _send_watcher_message(self, platform_name: str, chat_id, thread_id, message_text: str, watcher: dict) -> None:
         from gateway.run import _non_conversational_metadata
-        source = await asyncio.to_thread(self._build_process_event_source, watcher)
+        route = dict(watcher)
+        # Legacy direct watchers predate chat_type; their original default was DM.
+        if not route.get("session_key"):
+            route.setdefault("chat_type", "dm")
+        source = await asyncio.to_thread(self._build_process_event_source, route)
+        if source is None:
+            return
+        platform_name = source.platform.value
+        chat_id, thread_id = source.chat_id, source.thread_id
         adapter = self._resolve_injection_adapter(platform_name, source)
         if adapter and chat_id:
             with _log_suppressed(logging.ERROR, "Watcher delivery error: %s"):
@@ -1691,6 +1700,7 @@ class GatewayNotificationsMixin:
             "type": "completion",
             "session_id": session_id,
             **{k: watcher.get(k, "") for k in _WATCHER_ROUTE_FIELDS},
+            "profile": str(watcher.get("profile") or watcher.get("origin_profile") or "").strip() or None,
             "message_id": str(watcher.get("message_id") or "").strip() or None,
             "started_at": getattr(session, "started_at", None),
             "command": _redact_gateway_user_facing_secrets(_command),

@@ -397,6 +397,7 @@ class GatewayGoalsMixin:
             "session_key": "",
             "platform": platform_name,
             "chat_id": chat_id,
+            "profile": route_profile or "",
             **{k: route.get(k, "") for k in ("chat_type", "thread_id", "user_id", "user_name")},
         })
         if source is None:

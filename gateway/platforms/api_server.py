@@ -3619,7 +3619,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if confirmed_runtime_lock:
             expected_provider = self._clean_runtime_id(
                 route.get("provider") or requested_runtime.get("provider"), max_len=80)
-            expected_model = self._clean_runtime_id(route.get("model") or requested_runtime.get("model"))
+            expected_model = self._clean_runtime_id(
+                route.get("model") or requested_runtime.get("model"))
             if (expected_provider and actual_provider != expected_provider) or (
                 expected_model and actual_model != expected_model):
                 raise RuntimeError(
@@ -3831,7 +3832,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_run_approval = _run_route_delegate("_handle_run_approval")
     _handle_steer_run = _run_route_delegate("_handle_steer_run")
     _handle_stop_run = _run_route_delegate("_handle_stop_run")
-
     async def _sweep_orphaned_runs(self) -> None:
         return await _api_runs._sweep_orphaned_runs(self)
 
