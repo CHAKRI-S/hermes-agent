@@ -344,6 +344,9 @@ def test_stale_fleet_matrix_on_latest_receipt_is_pending(monkeypatch):
 
 
 def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
+    # The test supplies an empty supervisor fleet on every host. Without this,
+    # macOS ignores the mocked PID scan and restarts the operator's launchd jobs.
+    monkeypatch.setattr(update_cmd_fleet, "_restart_macos_launchd_gateways", lambda *a, **k: None)
     monkeypatch.setattr(
         "hermes_cli.gateway.find_gateway_pids", lambda **k: []
     )

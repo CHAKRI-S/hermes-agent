@@ -1438,6 +1438,7 @@ def _live_system_guard(request, monkeypatch):
     # ── Subprocess command-string inspection (whole-line) ──────────
     _HERMES_TOKENS = (
         "hermes-gateway",
+        "ai.hermes.gateway",
         "hermes.service",
         "hermes_cli.main gateway",
         "hermes_cli/main.py gateway",
@@ -1448,6 +1449,7 @@ def _live_system_guard(request, monkeypatch):
         "restart", "start", "stop", "kill", "reload",
         "reset-failed", "enable", "disable", "mask", "unmask",
         "daemon-reload", "try-restart", "reload-or-restart",
+        "kickstart", "bootstrap", "bootout", "load", "unload", "remove", "submit",
     )
     _PROCESS_KILLERS = ("pkill", "killall", "taskkill", "skill", "fuser")
     _CONTAINER_RUNTIMES = ("docker", "podman", "nerdctl")
@@ -1486,17 +1488,22 @@ def _live_system_guard(request, monkeypatch):
         low = cmd_str.lower()
         return any(tok in low for tok in _HERMES_TOKENS)
 
-    def _is_blocked_systemctl(cmd) -> bool:
+    def _is_blocked_service_control(cmd) -> bool:
+        import re
+
         cmd_str = _cmd_to_string(cmd)
-        if "systemctl" not in cmd_str:
+        if not any(manager in cmd_str for manager in ("systemctl", "launchctl")):
             return False
         if not _matches_hermes_gateway(cmd_str):
             return False
-        try:
-            tokens = _shlex.split(cmd_str)
-        except ValueError:
-            tokens = cmd_str.split()
-        return any(verb in tokens for verb in _MUTATING_VERBS)
+        if isinstance(cmd, (list, tuple)) and cmd:
+            head = str(cmd[0]).rsplit("/", 1)[-1]
+            if head not in (*_WRAPPER_COMMANDS, "systemctl", "launchctl"):
+                return False  # argv arguments are data, not executable commands
+        # Shell wrappers retain quoted command strings as one shlex token.
+        # Match word boundaries too so bash -c 'launchctl kickstart ...' is guarded.
+        return any(re.search(r"\b" + re.escape(verb) + r"\b", cmd_str)
+                   for verb in _MUTATING_VERBS)
 
     def _is_process_killer(cmd) -> bool:
         cmd_str = _cmd_to_string(cmd)
@@ -1532,11 +1539,11 @@ def _live_system_guard(request, monkeypatch):
         return False
 
     def _check_subprocess_cmd(name, cmd):
-        if _is_blocked_systemctl(cmd):
+        if _is_blocked_service_control(cmd):
             raise RuntimeError(
                 f"tests/conftest.py live-system guard: blocked "
                 f"subprocess.{name}({cmd!r}) — would mutate the "
-                "live hermes-gateway systemd unit. Mock "
+                "live Hermes systemd/launchd service. Mock "
                 "subprocess.run / _run_systemctl in the test, or "
                 "mark with @pytest.mark.live_system_guard_bypass."
             )

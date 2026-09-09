@@ -63,3 +63,27 @@ def test_gateway_start_inside_a_container_exec_is_not_blocked():
 def test_gateway_start_on_the_host_is_still_blocked():
     with pytest.raises(RuntimeError, match="REAL.*gateway runtime"):
         subprocess.run(["python", "-m", "hermes_cli.main", "gateway", "start"])
+
+
+@pytest.mark.parametrize("verb", ["kickstart", "bootout", "bootstrap"])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_launchd_mutations_are_blocked_without_executing_a_real_service(tmp_path, verb, wrapped):
+    # Even a broken guard can only invoke this harmless temporary command.
+    command = tmp_path / "launchctl"
+    command.write_text("#!/bin/sh\nexit 0\n")
+    command.chmod(0o755)
+    argv = [str(command), verb, "gui/501/ai.hermes.gateway.guard-regression-nomatch"]
+    if wrapped:
+        import shlex
+        argv = ["sh", "-c", shlex.join(argv)]
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(argv, check=True)
+
+
+def test_launchd_read_only_probe_is_allowed(tmp_path):
+    command = tmp_path / "launchctl"
+    command.write_text("#!/bin/sh\nprintf 'listed'\n")
+    command.chmod(0o755)
+    result = subprocess.run([str(command), "list", "ai.hermes.gateway.guard-regression-nomatch"],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout == "listed"
