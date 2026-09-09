@@ -38,7 +38,7 @@ from hermes_cli.config import load_config
 try:
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, RedirectResponse
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
     # running `hermes dashboard` needs fastapi+uvicorn; lazy install keeps
@@ -438,6 +438,22 @@ def _require_token(request: Request) -> None:
 _LOOPBACK_HOST_VALUES: frozenset = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+_PUBLIC_DASHBOARD_HOST_ALIASES: frozenset = frozenset(
+    h.strip().lower()
+    for h in os.getenv("HERMES_DASHBOARD_HOST_ALIASES", "").split(",")
+    if h.strip()
+)
+_PUBLIC_DASHBOARD_DOMAIN_REDIRECTS: Dict[str, str] = {}
+for _entry in os.getenv("HERMES_DASHBOARD_DOMAIN_REDIRECTS", "").split(","):
+    if "=" not in _entry:
+        continue
+    _host, _path = _entry.split("=", 1)
+    _host = _host.strip().lower()
+    _path = _path.strip()
+    if _host and _path.startswith("/"):
+        _PUBLIC_DASHBOARD_DOMAIN_REDIRECTS[_host] = _path
+
+
 def _dashboard_public_hosts() -> frozenset[str]:
     """Return the exact hostname declared by ``dashboard.public_url``.
 
@@ -553,7 +569,7 @@ def _is_accepted_host(
         return False
     # All-interfaces bind: no Host-layer defence is possible; rely on operator
     # network controls.
-    if host_only in trusted_public_hosts or bound_host in {"0.0.0.0", "::"}:
+    if host_only in trusted_public_hosts or host_only in _PUBLIC_DASHBOARD_HOST_ALIASES or bound_host in {"0.0.0.0", "::"}:
         return True
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
@@ -631,6 +647,26 @@ async def _dashboard_auth_gate(request: Request, call_next):
     """
     from hermes_cli.dashboard_auth.middleware import gated_auth_middleware
     return await gated_auth_middleware(request, call_next)
+
+
+@app.middleware("http")
+async def public_plugin_domain_redirect_middleware(request: Request, call_next):
+    """Send dedicated plugin hostnames to their plugin tab root.
+
+    Cloudflare Tunnel can route ``mnemosyne.workinflow.cloud`` to this dashboard,
+    but it does not rewrite ``/`` to the plugin SPA route. Keep the alias local
+    and narrow so the normal Hermes dashboard host remains unchanged.
+    """
+    host_only = _host_header_hostname(request.headers.get("host", ""))
+
+    redirect_path = _PUBLIC_DASHBOARD_DOMAIN_REDIRECTS.get(host_only)
+    if (
+        redirect_path
+        and request.method in ("GET", "HEAD")
+        and request.url.path in ("", "/")
+    ):
+        return RedirectResponse(url=redirect_path, status_code=307)
+    return await call_next(request)
 
 
 @app.middleware("http")

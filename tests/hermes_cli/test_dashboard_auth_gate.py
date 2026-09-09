@@ -91,7 +91,13 @@ def _stub_uvicorn_run(monkeypatch):
     """Replace uvicorn.Config/Server with no-op fakes so start_server
     returns immediately (rather than blocking on the event loop). Returns the dict
     that will capture the keyword args.
+
+    Also neuters the EADDRINUSE pre-bind probe: a live dashboard on this host
+    (127.0.0.1:9119) would otherwise fail these tests with SystemExit(75).
     """
+    monkeypatch.setattr(
+        "hermes_cli.web_server._port_bind_conflict", lambda host, port: False
+    )
     import asyncio
     import contextlib
     import uvicorn
