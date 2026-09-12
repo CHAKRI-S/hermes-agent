@@ -2470,6 +2470,7 @@ class TestLaunchctlBootstrapEioRetry:
         assert excinfo.value.returncode == 5
 
 
+@pytest.mark.live_system_guard_bypass
 class TestLaunchdUnloadedJobStderrStaysOffTerminal:
     """#106273: against an UNLOADED job, ``launchctl bootout`` / ``kickstart -k`` exit 3 and print
     ``Could not find service ...`` / ``Boot-out failed: 3`` on fd 2. Those exits are the *handled*
