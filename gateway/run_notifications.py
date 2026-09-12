@@ -907,7 +907,11 @@ class GatewayNotificationsMixin:
             if cached_source is not None:
                 return cached_source
             derived = _parse_session_key(session_key) or {}
-        profile = derived.get("profile")
+        # A structured agent: key is authoritative (its profile slot wins over stale
+        # event metadata); only when the event carries NO structured key does an
+        # explicit profile stamp own the transport — legacy direct watchers keyless.
+        profile = derived.get("profile") if derived else (
+            str(evt.get("profile") or evt.get("origin_profile") or "").strip() or None)
         platform_name = str(evt.get("platform") or derived.get("platform") or "").strip().lower()
         chat_type = str(evt.get("chat_type") or derived.get("chat_type") or "").strip().lower()
         chat_id = str(evt.get("chat_id") or derived.get("chat_id") or "").strip()
