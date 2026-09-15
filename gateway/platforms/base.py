@@ -3555,6 +3555,20 @@ class BasePlatformAdapter(ABC):
             return False
         if actual_key == session_key:
             return True
+        # Multiplex handoff: the runner stamps ``source.profile`` inside the message handler,
+        # which runs AFTER this guard on background deliveries, so an unstamped source keys as
+        # ``agent:main:...`` while the admitted session key carries the routed profile. Accept
+        # only when stripping the profile namespace leaves the keys byte-identical AND nothing
+        # else claims the source (no ``source.profile``, no owner profile) — platform, chat,
+        # thread and user still match exactly, which is what this guard protects. A genuinely
+        # cross-chat response keeps differing tails and stays blocked.
+        parts = session_key.split(":", 2), actual_key.split(":", 2)
+        unstamped = not (getattr(event.source, "profile", None) or getattr(self, "_owner_profile", None))
+        if unstamped and all(len(p) > 2 for p in parts) and parts[0][2] == parts[1][2]:
+            logger.debug(
+                "[%s] Routing guard accepted unstamped multiplex delivery for %s (profile applied at handler scope)",
+                self.name, session_key)
+            return True
         logger.warning(
             "[%s] Routing guard blocked cross-session response: claimed=%s actual=%s chat=%s thread=%s",
             self.name,

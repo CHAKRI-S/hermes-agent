@@ -122,6 +122,10 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/plugins` | List installed plugins and their status |
 | `/pet [list\|<slug>]` | Toggle or adopt a [petdex](/user-guide/features/pets) mascot. `/pet` toggles the pane, `/pet list` shows installed pets, `/pet <slug>` adopts a specific one. |
 | `/hatch <description>` (alias: `/generate-pet`) | Generate a brand-new petdex pet from a text description, using the configured image backend (OpenRouter / Nous Portal). See [Pets](/user-guide/features/pets). |
+| `/plan_sprint [goal]` | Create a sprint-gated implementation plan (phases, role tasks, acceptance checks) and stop before any code is written. |
+| `/run_sprint [auto\|plan path\|notes]` | Run one sprint from the latest active plan; use `auto` to auto-select the worker profile. |
+| `/continue_sprint [auto\|notes]` | Continue the latest active unfinished sprint plan; use `auto` for a coordinator-selected worker profile. |
+| `/auto_agent <task>` | Route a bounded task through a coordinator-selected worker/profile. |
 
 ### Info
 
@@ -304,6 +308,8 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/update` | Update Hermes Agent to the latest version. |
 | `/restart` | Gracefully restart the gateway after draining active runs. When the gateway comes back online, it sends a confirmation to the requester's chat/thread. |
 | `/debug` | Upload debug report (system info + logs) and get shareable links. |
+| `/read [limit: 200] [prompt: question]` | Read this channel/thread's recent history (Discord) with a selectable limit, then answer. |
+| `/threadread name: "<thread name>" [limit: 200] [prompt: question]` | Create a Discord thread, read parent-channel history with a selectable limit, then summarize inside the thread. |
 | `/help` | Show messaging help. |
 | `/<skill-name>` | Invoke any installed skill by name. |
 
